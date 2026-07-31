@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target
+
+# macOS
+.DS_Store
+
+# Meeting recordings
+recordings/
+
+# Whisper models
+models/
+AGENT.md
+ARCHITECTURE.md
+PLAN.md
+CONTEXT.md
