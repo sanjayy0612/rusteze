@@ -7,6 +7,7 @@ output_path="$output_directory/rusteze-capture-helper"
 
 mkdir -p "$output_directory"
 xcrun swiftc "$script_directory/Sources/main.swift" \
+  -parse-as-library \
   -o "$output_path" \
   -framework AVFoundation \
   -framework CoreGraphics
