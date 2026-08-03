@@ -41,9 +41,21 @@ before running `start`:
 ./macos-helper/build.sh
 ```
 
-Its current `check-permissions` protocol is the boundary Rust will use when
-capture commands are added. Set `RUSTEZE_CAPTURE_HELPER` to use a helper binary
+Its current `check-permissions` protocol is the boundary Rust uses for capture.
+It records separate `mic.caf` and `system.caf` tracks and finalizes both when
+`rusteze` receives `Ctrl+C`. Set `RUSTEZE_CAPTURE_HELPER` to use a helper binary
 at another path during development.
+
+Before recording, allow the helper under **Microphone** and **Screen Recording**
+in System Settings. You can request the initial macOS prompts with:
+
+```bash
+./macos-helper/.build/debug/rusteze-capture-helper request-permissions
+```
+
+`rusteze transcribe <session-path>` is present as the model-independent
+transcription boundary. It intentionally reports that no engine is configured
+until a local engine (such as whisper.cpp) is selected and implemented.
 
 Not in the first version:
 

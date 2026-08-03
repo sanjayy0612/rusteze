@@ -1,7 +1,9 @@
 mod meeting;
 mod native_helper;
+mod transcription;
 
 use std::{env, process, sync::mpsc};
+use transcription::TranscriptionEngine;
 
 fn main() {
     let mut arguments = env::args().skip(1);
@@ -33,7 +35,37 @@ fn main() {
                 }
             }
         }
+        Some("transcribe") => {
+            let Some(session_path) = arguments.next() else {
+                print_usage();
+                process::exit(2);
+            };
+            if arguments.next().is_some() {
+                print_usage();
+                process::exit(2);
+            }
+            transcribe(&session_path);
+        }
         _ => print_usage(),
+    }
+}
+
+fn transcribe(session_path: &str) {
+    let engine = transcription::UnconfiguredEngine;
+    match engine.transcribe(std::path::Path::new(session_path)) {
+        Ok(transcript) => {
+            match transcription::write_transcript(std::path::Path::new(session_path), &transcript) {
+                Ok(()) => println!("Transcript written to {session_path}"),
+                Err(error) => {
+                    eprintln!("{error}");
+                    process::exit(1);
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            process::exit(1);
+        }
     }
 }
 
@@ -55,10 +87,13 @@ fn start_recording(title: &str) {
         fail_and_exit(&mut session, &permissions.guidance());
     }
 
+    let capture = match native_helper::start_capture(session.folder()) {
+        Ok(capture) => capture,
+        Err(error) => fail_and_exit(&mut session, &error.to_string()),
+    };
+
     println!("Recording session: {}", session.folder().display());
-    println!(
-        "Permissions confirmed. Audio capture is not connected yet. Press Ctrl+C to stop safely."
-    );
+    println!("Recording microphone and system audio. Press Ctrl+C to stop safely.");
 
     let (shutdown_sender, shutdown_receiver) = mpsc::channel();
     if let Err(error) = ctrlc::set_handler(move || {
@@ -74,6 +109,13 @@ fn start_recording(title: &str) {
         let _ = meeting::fail(&mut session, "Shutdown signal channel closed unexpectedly");
         eprintln!("Recording stopped unexpectedly.");
         process::exit(1);
+    }
+
+    if let Err(error) = capture.stop() {
+        fail_and_exit(
+            &mut session,
+            &format!("Could not finalize audio files: {error}"),
+        );
     }
 
     match meeting::complete(&mut session) {
@@ -99,5 +141,6 @@ fn print_usage() {
     println!("Usage:");
     println!("  rusteze start [title]");
     println!("  rusteze create-meeting [title]");
+    println!("  rusteze transcribe <session-path>");
     println!("Example: rusteze start \"Rust workshop\"");
 }

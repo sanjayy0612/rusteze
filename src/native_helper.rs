@@ -1,8 +1,9 @@
 use std::{
     collections::HashMap,
     env, fmt, io,
+    io::{BufRead, BufReader, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -39,6 +40,11 @@ pub enum HelperError {
     Launch(io::Error),
     Failed { status: Option<i32>, stderr: String },
     InvalidResponse(String),
+}
+
+pub struct CaptureProcess {
+    child: Child,
+    stdin: ChildStdin,
 }
 
 impl fmt::Display for HelperError {
@@ -89,6 +95,62 @@ pub fn check_permissions() -> Result<PermissionStatus, HelperError> {
     }
 
     parse_permission_status(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Starts both native capture streams and waits for the helper's ready signal.
+pub fn start_capture(session_folder: &std::path::Path) -> Result<CaptureProcess, HelperError> {
+    let helper_path = helper_path();
+    if !helper_path.is_file() {
+        return Err(HelperError::Missing(helper_path));
+    }
+
+    let mut child = Command::new(helper_path)
+        .arg("record")
+        .arg(session_folder)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(HelperError::Launch)?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        HelperError::InvalidResponse("macOS helper did not provide a control channel".to_string())
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        HelperError::InvalidResponse("macOS helper did not provide a status channel".to_string())
+    })?;
+    let mut status_line = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut status_line)
+        .map_err(HelperError::Launch)?;
+
+    if status_line.trim() != "RESULT recording-started" {
+        let status = child.wait().ok().and_then(|result| result.code());
+        return Err(HelperError::Failed {
+            status,
+            stderr: status_line,
+        });
+    }
+
+    Ok(CaptureProcess { child, stdin })
+}
+
+impl CaptureProcess {
+    /// Asks the helper to finalize streams instead of force-killing it.
+    pub fn stop(mut self) -> Result<(), HelperError> {
+        self.stdin
+            .write_all(b"stop\n")
+            .map_err(HelperError::Launch)?;
+        self.stdin.flush().map_err(HelperError::Launch)?;
+        let status = self.child.wait().map_err(HelperError::Launch)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(HelperError::Failed {
+                status: status.code(),
+                stderr: "Capture helper stopped with an error.".to_string(),
+            })
+        }
+    }
 }
 
 fn helper_path() -> PathBuf {
