@@ -16,9 +16,34 @@ Always get the consent of everyone being recorded and follow the laws and polici
 
 This is a learning-by-building project. We will build one small, understandable piece at a time instead of starting with a large, complex application.
 
-## Phase 1: Rust recorder
+## Current phase: native macOS helper and permission preflight
 
-The first goal is a Rust command that records audio in the foreground and stops cleanly with `Ctrl+C`.
+`rusteze start [title]` creates a self-contained session folder under
+`~/Documents/rusteze/meetings`, asks the included native macOS helper to check
+Microphone and Screen Recording access, records the lifecycle in `session.json`,
+and stops cleanly with `Ctrl+C`. Audio capture is deliberately not connected
+yet; the next phase adds microphone capture.
+
+```bash
+cargo run -- start "Rust workshop"
+```
+
+The session progresses from `recording` to `stopping` to `completed`. If the
+program cannot continue normally, `session.json` records a `failed` state and
+a recoverable reason. To grant missing access, open **System Settings → Privacy
+& Security**, then enable Rusteze's terminal/binary under **Microphone** and
+**Screen Recording**.
+
+The helper source lives at `macos-helper/Sources/main.swift`. Build it once
+before running `start`:
+
+```bash
+./macos-helper/build.sh
+```
+
+Its current `check-permissions` protocol is the boundary Rust will use when
+capture commands are added. Set `RUSTEZE_CAPTURE_HELPER` to use a helper binary
+at another path during development.
 
 Not in the first version:
 
@@ -31,11 +56,10 @@ Not in the first version:
 
 ```text
 rusteze start
-rusteze stop
+rusteze start [title]
 rusteze status
 rusteze list
-rusteze transcribe <file>
-rusteze summarize <file>
+rusteze transcribe <session-id-or-path>
 ```
 
 We will introduce these commands one at a time as the project grows.
