@@ -2,7 +2,7 @@ mod meeting;
 mod native_helper;
 mod transcription;
 
-use std::{env, process, sync::mpsc};
+use std::{env, process, sync::mpsc, time::Duration};
 use transcription::TranscriptionEngine;
 
 fn main() {
@@ -70,6 +70,17 @@ fn transcribe(session_path: &str) {
 }
 
 fn start_recording(title: &str) {
+    match meeting::recover_interrupted_sessions() {
+        Ok(recovered) if !recovered.is_empty() => {
+            eprintln!("Recovered {} interrupted session(s).", recovered.len());
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("Could not check for interrupted sessions: {error}");
+            process::exit(1);
+        }
+    }
+
     let mut session = match meeting::start(title) {
         Ok(session) => session,
         Err(error) => {
@@ -77,6 +88,13 @@ fn start_recording(title: &str) {
             process::exit(1);
         }
     };
+
+    if let Err(error) = meeting::ensure_recording_space(&session) {
+        fail_and_exit(
+            &mut session,
+            &format!("Not enough disk space to record safely: {error}"),
+        );
+    }
 
     let permissions = match native_helper::check_permissions() {
         Ok(permissions) => permissions,
@@ -87,7 +105,7 @@ fn start_recording(title: &str) {
         fail_and_exit(&mut session, &permissions.guidance());
     }
 
-    let capture = match native_helper::start_capture(session.folder()) {
+    let mut capture = match native_helper::start_capture(session.folder()) {
         Ok(capture) => capture,
         Err(error) => fail_and_exit(&mut session, &error.to_string()),
     };
@@ -105,10 +123,18 @@ fn start_recording(title: &str) {
         process::exit(1);
     }
 
-    if shutdown_receiver.recv().is_err() {
-        let _ = meeting::fail(&mut session, "Shutdown signal channel closed unexpectedly");
-        eprintln!("Recording stopped unexpectedly.");
-        process::exit(1);
+    loop {
+        match shutdown_receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(()) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(error) = capture.check_health() {
+                    fail_and_exit(&mut session, &error.to_string());
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                fail_and_exit(&mut session, "Shutdown signal channel closed unexpectedly");
+            }
+        }
     }
 
     if let Err(error) = capture.stop() {

@@ -4,6 +4,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub const MINIMUM_FREE_BYTES: u64 = 256 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionState {
     Idle,
@@ -42,7 +44,7 @@ impl MeetingSession {
     }
 
     fn save(&self) -> io::Result<()> {
-        fs::write(self.folder.join("session.json"), self.json())
+        write_atomically(&self.folder.join("session.json"), &self.json())
     }
 
     fn transition_to(&mut self, state: SessionState) -> io::Result<()> {
@@ -104,6 +106,70 @@ pub fn start(title: &str) -> io::Result<MeetingSession> {
     create_session(title, SessionState::Recording)
 }
 
+/// Finds sessions left active by a crash and records a recoverable failure.
+pub fn recover_interrupted_sessions() -> io::Result<Vec<PathBuf>> {
+    let meetings_directory = default_meetings_directory()?;
+    let mut recovered = Vec::new();
+    let entries = match fs::read_dir(meetings_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(recovered),
+        Err(error) => return Err(error),
+    };
+
+    for entry in entries {
+        let session_path = entry?.path().join("session.json");
+        let contents = match fs::read_to_string(&session_path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let now = unix_seconds_now()?;
+        let Some(recovered_json) = recover_session_json(&contents, now) else {
+            continue;
+        };
+        write_atomically(&session_path, &recovered_json)?;
+        recovered.push(session_path);
+    }
+
+    Ok(recovered)
+}
+
+fn recover_session_json(contents: &str, ended_at: u64) -> Option<String> {
+    let was_active = contents.contains("\"state\": \"recording\"")
+        || contents.contains("\"state\": \"stopping\"");
+    if !was_active {
+        return None;
+    }
+
+    Some(
+        contents
+            .replace("\"state\": \"recording\"", "\"state\": \"failed\"")
+            .replace("\"state\": \"stopping\"", "\"state\": \"failed\"")
+            .replace(
+                "\"ended_at_unix_seconds\": null",
+                &format!("\"ended_at_unix_seconds\": {ended_at}"),
+            )
+            .replace(
+                "\"recovery_reason\": null",
+                "\"recovery_reason\": \"Rusteze was interrupted before recording could finish. Audio already written was preserved.\"",
+            ),
+    )
+}
+
+/// Refuses to start a new recording when there is too little disk space for a safe session.
+pub fn ensure_recording_space(session: &MeetingSession) -> io::Result<()> {
+    let available = available_disk_space(session.folder())?;
+    if available < MINIMUM_FREE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Only {available} bytes are free; Rusteze requires at least {MINIMUM_FREE_BYTES} bytes before recording."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Records the safe foreground shutdown sequence after Ctrl+C.
 pub fn complete(session: &mut MeetingSession) -> io::Result<()> {
     session.transition_to(SessionState::Stopping)?;
@@ -139,6 +205,39 @@ fn create_session(title: &str, initial_state: SessionState) -> io::Result<Meetin
     fs::create_dir(&session.folder)?;
     session.save()?;
     Ok(session)
+}
+
+fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
+    let temporary_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    fs::write(&temporary_path, contents)?;
+    fs::rename(temporary_path, path)
+}
+
+#[cfg(target_os = "macos")]
+fn available_disk_space(path: &Path) -> io::Result<u64> {
+    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Session path contains a null byte.",
+        )
+    })?;
+    let mut stats = MaybeUninit::<libc::statvfs>::zeroed();
+    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn available_disk_space(_path: &Path) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Rusteze recording is macOS-only.",
+    ))
 }
 
 fn unix_seconds_now() -> io::Result<u64> {
@@ -209,7 +308,7 @@ fn slugify(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{slugify, MeetingSession, SessionState};
+    use super::{recover_session_json, slugify, MeetingSession, SessionState};
     use std::path::PathBuf;
 
     #[test]
@@ -238,5 +337,15 @@ mod tests {
         assert!(json.contains("\"state\": \"completed\""));
         assert!(json.contains("\"duration_seconds\": 25"));
         assert!(json.contains("A \\\"quoted\\\" meeting"));
+    }
+
+    #[test]
+    fn recovers_an_interrupted_recording_without_touching_completed_sessions() {
+        let active = "{\n  \"state\": \"recording\",\n  \"ended_at_unix_seconds\": null,\n  \"recovery_reason\": null\n}";
+        let recovered = recover_session_json(active, 42).unwrap();
+        assert!(recovered.contains("\"state\": \"failed\""));
+        assert!(recovered.contains("\"ended_at_unix_seconds\": 42"));
+        assert!(recovered.contains("Audio already written was preserved"));
+        assert!(recover_session_json("{\"state\": \"completed\"}", 42).is_none());
     }
 }

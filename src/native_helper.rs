@@ -135,6 +135,18 @@ pub fn start_capture(session_folder: &std::path::Path) -> Result<CaptureProcess,
 }
 
 impl CaptureProcess {
+    /// Detects an unexpected helper exit, such as a capture device failure.
+    pub fn check_health(&mut self) -> Result<(), HelperError> {
+        match self.child.try_wait().map_err(HelperError::Launch)? {
+            Some(status) => Err(HelperError::Failed {
+                status: status.code(),
+                stderr: "Capture helper exited unexpectedly; audio already written was preserved."
+                    .to_string(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Asks the helper to finalize streams instead of force-killing it.
     pub fn stop(mut self) -> Result<(), HelperError> {
         self.stdin
