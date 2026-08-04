@@ -10,3 +10,4 @@ recordings/
 
 # Whisper models
 models/
+/tools/whisper.cpp/

@@ -62,6 +62,20 @@ in System Settings. You can request the initial macOS prompts with:
 transcription boundary. It intentionally reports that no engine is configured
 until a local engine (such as whisper.cpp) is selected and implemented.
 
+## Local model setup
+
+Rusteze uses the native `whisper.cpp` runtime rather than Python or a virtual
+environment. The setup script downloads and builds the runtime, then downloads
+the local `large-v3-turbo-q5_0` model (about 547 MiB):
+
+```bash
+./scripts/setup-whisper-cpp.sh
+```
+
+The runtime is stored in `tools/whisper.cpp/`; models are stored in `models/`.
+Both are ignored by Git. See `.env.whisper.example` only when you need a custom
+location.
+
 Not in the first version:
 
 - background daemon support;
