@@ -16,13 +16,13 @@ Always get the consent of everyone being recorded and follow the laws and polici
 
 This is a learning-by-building project. We will build one small, understandable piece at a time instead of starting with a large, complex application.
 
-## Current phase: native macOS helper and permission preflight
+## Current phase: two-track recording, ready for hardware validation
 
 `rusteze start [title]` creates a self-contained session folder under
 `~/Documents/rusteze/meetings`, asks the included native macOS helper to check
 Microphone and Screen Recording access, records the lifecycle in `session.json`,
-and stops cleanly with `Ctrl+C`. Audio capture is deliberately not connected
-yet; the next phase adds microphone capture.
+starts separate microphone and system-audio tracks, and stops cleanly with
+`Ctrl+C`.
 
 ```bash
 cargo run -- start "Rust workshop"
@@ -33,6 +33,11 @@ program cannot continue normally, `session.json` records a `failed` state and
 a recoverable reason. To grant missing access, open **System Settings → Privacy
 & Security**, then enable Rusteze's terminal/binary under **Microphone** and
 **Screen Recording**.
+
+Before capture begins, Rusteze requires 256 MiB of free disk space. On the next
+`start`, it also marks any session left in `recording` or `stopping` after a
+crash/interruption as `failed` while preserving the audio that was already
+written.
 
 The helper source lives at `macos-helper/Sources/main.swift`. Build it once
 before running `start`:
@@ -67,11 +72,9 @@ Not in the first version:
 ## Planned command shape
 
 ```text
-rusteze start
 rusteze start [title]
-rusteze status
-rusteze list
-rusteze transcribe <session-id-or-path>
+rusteze create-meeting [title]
+rusteze transcribe <session-path>
 ```
 
 We will introduce these commands one at a time as the project grows.
