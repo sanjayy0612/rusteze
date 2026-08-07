@@ -9,6 +9,20 @@ enum MicrophonePermission: String {
     case notDetermined = "not_determined"
 }
 
+enum CaptureMode: String {
+    case systemOnly = "system"
+    case microphoneOnly = "microphone"
+    case both
+
+    var requiresMicrophone: Bool {
+        self == .microphoneOnly || self == .both
+    }
+
+    var requiresScreenRecording: Bool {
+        self == .systemOnly || self == .both
+    }
+}
+
 func microphonePermission() -> MicrophonePermission {
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
     case .authorized: return .granted
@@ -26,16 +40,27 @@ func printPermissionStatus() {
     print("SCREEN_RECORDING \(screenRecording)")
 }
 
-func requestPermissions() async {
-    if microphonePermission() == .notDetermined {
+func requestPermissions(for mode: CaptureMode) async {
+    if mode.requiresMicrophone, microphonePermission() == .notDetermined {
         _ = await withCheckedContinuation { continuation in
             AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
         }
     }
-    if !CGPreflightScreenCaptureAccess() {
+    if mode.requiresScreenRecording, !CGPreflightScreenCaptureAccess() {
         _ = CGRequestScreenCaptureAccess()
     }
     printPermissionStatus()
+}
+
+func missingPermissions(for mode: CaptureMode) -> [String] {
+    var missing = [String]()
+    if mode.requiresMicrophone, microphonePermission() != .granted {
+        missing.append("Microphone")
+    }
+    if mode.requiresScreenRecording, !CGPreflightScreenCaptureAccess() {
+        missing.append("Screen Recording")
+    }
+    return missing
 }
 
 enum CaptureError: LocalizedError {
@@ -108,8 +133,8 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
-        try await stream.startCapture()
         self.stream = stream
+        try await stream.startCapture()
     }
 
     func stop() async {
@@ -163,36 +188,76 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 }
 
 final class CaptureController {
-    private let microphone = MicrophoneRecorder()
+    private var microphone: MicrophoneRecorder?
     private var systemAudio: SystemAudioRecorder?
 
-    func start(in folder: URL) async throws {
-        try microphone.start(outputURL: folder.appendingPathComponent("mic.caf"))
-        let systemAudio = SystemAudioRecorder(outputURL: folder.appendingPathComponent("system.caf"))
-        do {
-            try await systemAudio.start()
-            self.systemAudio = systemAudio
-        } catch {
-            microphone.stop()
-            throw error
+    func start(in folder: URL, mode: CaptureMode) async throws {
+        switch mode {
+        case .systemOnly:
+            let systemAudio = SystemAudioRecorder(outputURL: folder.appendingPathComponent("system.caf"))
+            do {
+                try await systemAudio.start()
+                self.systemAudio = systemAudio
+            } catch {
+                await systemAudio.stop()
+                throw error
+            }
+        case .microphoneOnly:
+            let microphone = MicrophoneRecorder()
+            do {
+                try microphone.start(outputURL: folder.appendingPathComponent("mic.caf"))
+                self.microphone = microphone
+            } catch {
+                microphone.stop()
+                throw error
+            }
+        case .both:
+            let microphone = MicrophoneRecorder()
+            do {
+                try microphone.start(outputURL: folder.appendingPathComponent("mic.caf"))
+            } catch {
+                microphone.stop()
+                throw error
+            }
+            self.microphone = microphone
+
+            let systemAudio = SystemAudioRecorder(outputURL: folder.appendingPathComponent("system.caf"))
+            do {
+                try await systemAudio.start()
+                self.systemAudio = systemAudio
+            } catch {
+                await systemAudio.stop()
+                self.microphone?.stop()
+                self.microphone = nil
+                throw error
+            }
         }
     }
 
     func stop() async {
         await systemAudio?.stop()
-        microphone.stop()
+        microphone?.stop()
+        systemAudio = nil
+        microphone = nil
     }
 }
 
-func record(folderPath: String) async -> Int32 {
-    guard CGPreflightScreenCaptureAccess(), microphonePermission() == .granted else {
+func record(folderPath: String, modeValue: String) async -> Int32 {
+    guard let mode = CaptureMode(rawValue: modeValue) else {
+        fputs("Invalid capture mode '\(modeValue)'. Expected system, microphone, or both.\n", stderr)
+        return 64
+    }
+
+    let missing = missingPermissions(for: mode)
+    guard missing.isEmpty else {
         printPermissionStatus()
+        fputs("Missing permission for \(mode.rawValue) capture: \(missing.joined(separator: " and ")).\n", stderr)
         return 77
     }
 
     let controller = CaptureController()
     do {
-        try await controller.start(in: URL(fileURLWithPath: folderPath))
+        try await controller.start(in: URL(fileURLWithPath: folderPath), mode: mode)
         print("RESULT recording-started")
         fflush(stdout)
         while let command = readLine() {
@@ -213,11 +278,35 @@ struct RustezeCaptureHelper {
     static func main() async {
         let arguments = Array(CommandLine.arguments.dropFirst())
         switch arguments.first {
-        case "check-permissions": printPermissionStatus()
-        case "request-permissions": await requestPermissions()
-        case "record" where arguments.count == 2: exit(await record(folderPath: arguments[1]))
+        case "check-permissions":
+            guard arguments.count == 1 || arguments.count == 2 else {
+                fputs("Usage: rusteze-capture-helper check-permissions [system|microphone|both]\n", stderr)
+                exit(64)
+            }
+            if arguments.count == 2, CaptureMode(rawValue: arguments[1]) == nil {
+                fputs("Invalid capture mode '\(arguments[1])'. Expected system, microphone, or both.\n", stderr)
+                exit(64)
+            }
+            printPermissionStatus()
+        case "request-permissions":
+            guard arguments.count == 1 || arguments.count == 2 else {
+                fputs("Usage: rusteze-capture-helper request-permissions [system|microphone|both]\n", stderr)
+                exit(64)
+            }
+            let mode = arguments.count == 2 ? CaptureMode(rawValue: arguments[1]) : .both
+            guard let mode else {
+                fputs("Invalid capture mode '\(arguments[1])'. Expected system, microphone, or both.\n", stderr)
+                exit(64)
+            }
+            await requestPermissions(for: mode)
+        case "record":
+            guard arguments.count == 3 else {
+                fputs("Usage: rusteze-capture-helper record SESSION_FOLDER system|microphone|both\n", stderr)
+                exit(64)
+            }
+            exit(await record(folderPath: arguments[1], modeValue: arguments[2]))
         default:
-            fputs("Usage: rusteze-capture-helper <check-permissions|request-permissions|record SESSION_FOLDER>\n", stderr)
+            fputs("Usage: rusteze-capture-helper <check-permissions|request-permissions|record SESSION_FOLDER system|microphone|both>\n", stderr)
             exit(64)
         }
     }
