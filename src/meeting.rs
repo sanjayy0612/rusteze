@@ -4,6 +4,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::native_helper::CaptureMode;
+
 pub const MINIMUM_FREE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +35,7 @@ pub struct MeetingSession {
     id: String,
     title: String,
     state: SessionState,
+    capture_mode: Option<CaptureMode>,
     started_at_unix_seconds: u64,
     ended_at_unix_seconds: Option<u64>,
     recovery_reason: Option<String>,
@@ -69,6 +72,24 @@ impl MeetingSession {
             .as_deref()
             .map(|reason| format!("\"{}\"", escape_json_string(reason)))
             .unwrap_or_else(|| "null".to_string());
+        let capture_mode = self
+            .capture_mode
+            .map(|mode| format!("\"{}\"", mode.as_str()))
+            .unwrap_or_else(|| "null".to_string());
+        let enabled_files = self
+            .capture_mode
+            .map(CaptureMode::output_files)
+            .unwrap_or_default();
+        let microphone_track = if enabled_files.contains(&"mic.caf") {
+            "\"mic.caf\""
+        } else {
+            "null"
+        };
+        let system_audio_track = if enabled_files.contains(&"system.caf") {
+            "\"system.caf\""
+        } else {
+            "null"
+        };
 
         format!(
             concat!(
@@ -76,34 +97,38 @@ impl MeetingSession {
                 "  \"session_id\": \"{}\",\n",
                 "  \"title\": \"{}\",\n",
                 "  \"state\": \"{}\",\n",
+                "  \"capture_mode\": {},\n",
                 "  \"started_at_unix_seconds\": {},\n",
                 "  \"ended_at_unix_seconds\": {},\n",
                 "  \"duration_seconds\": {},\n",
                 "  \"recovery_reason\": {},\n",
-                "  \"microphone_track\": null,\n",
-                "  \"system_audio_track\": null\n",
+                "  \"microphone_track\": {},\n",
+                "  \"system_audio_track\": {}\n",
                 "}}\n"
             ),
             escape_json_string(&self.id),
             escape_json_string(&self.title),
             self.state.as_str(),
+            capture_mode,
             self.started_at_unix_seconds,
             ended_at,
             duration,
             recovery_reason,
+            microphone_track,
+            system_audio_track,
         )
     }
 }
 
 /// Creates an idle meeting folder for the early folder-structure command.
 pub fn create(title: &str) -> io::Result<PathBuf> {
-    let session = create_session(title, SessionState::Idle)?;
+    let session = create_session(title, SessionState::Idle, None)?;
     Ok(session.folder)
 }
 
 /// Creates a session that is ready for the foreground recording lifecycle.
-pub fn start(title: &str) -> io::Result<MeetingSession> {
-    create_session(title, SessionState::Recording)
+pub fn start(title: &str, capture_mode: CaptureMode) -> io::Result<MeetingSession> {
+    create_session(title, SessionState::Recording, Some(capture_mode))
 }
 
 /// Finds sessions left active by a crash and records a recoverable failure.
@@ -184,7 +209,11 @@ pub fn fail(session: &mut MeetingSession, reason: &str) -> io::Result<()> {
     session.transition_to(SessionState::Failed)
 }
 
-fn create_session(title: &str, initial_state: SessionState) -> io::Result<MeetingSession> {
+fn create_session(
+    title: &str,
+    initial_state: SessionState,
+    capture_mode: Option<CaptureMode>,
+) -> io::Result<MeetingSession> {
     let started_at_unix_seconds = unix_seconds_now()?;
     let meeting_name = slugify(title);
     let meetings_directory = default_meetings_directory()?;
@@ -197,6 +226,7 @@ fn create_session(title: &str, initial_state: SessionState) -> io::Result<Meetin
         id,
         title: title.to_string(),
         state: initial_state,
+        capture_mode,
         started_at_unix_seconds,
         ended_at_unix_seconds: None,
         recovery_reason: None,
@@ -309,6 +339,7 @@ fn slugify(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{recover_session_json, slugify, MeetingSession, SessionState};
+    use crate::native_helper::CaptureMode;
     use std::path::PathBuf;
 
     #[test]
@@ -328,6 +359,7 @@ mod tests {
             id: "123-demo".to_string(),
             title: "A \"quoted\" meeting".to_string(),
             state: SessionState::Completed,
+            capture_mode: Some(CaptureMode::Both),
             started_at_unix_seconds: 100,
             ended_at_unix_seconds: Some(125),
             recovery_reason: None,
@@ -335,8 +367,31 @@ mod tests {
 
         let json = session.json();
         assert!(json.contains("\"state\": \"completed\""));
+        assert!(json.contains("\"capture_mode\": \"both\""));
+        assert!(json.contains("\"microphone_track\": \"mic.caf\""));
+        assert!(json.contains("\"system_audio_track\": \"system.caf\""));
         assert!(json.contains("\"duration_seconds\": 25"));
         assert!(json.contains("A \\\"quoted\\\" meeting"));
+    }
+
+    #[test]
+    fn metadata_lists_only_tracks_enabled_by_the_capture_mode() {
+        let session = MeetingSession {
+            folder: PathBuf::from("/tmp/meeting"),
+            id: "123-system".to_string(),
+            title: "System audio".to_string(),
+            state: SessionState::Recording,
+            capture_mode: Some(CaptureMode::System),
+            started_at_unix_seconds: 100,
+            ended_at_unix_seconds: None,
+            recovery_reason: None,
+        };
+
+        let json = session.json();
+        assert!(json.contains("\"capture_mode\": \"system\""));
+        assert!(json.contains("\"microphone_track\": null"));
+        assert!(json.contains("\"system_audio_track\": \"system.caf\""));
+        assert!(!json.contains("mic.caf"));
     }
 
     #[test]

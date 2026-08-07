@@ -5,19 +5,22 @@
 ```text
 Rust CLI
   ├─ creates session folder + session.json
+  ├─ selects system, microphone, or both capture mode
   ├─ launches and supervises native helper
   ├─ receives Ctrl+C and sends helper: stop
   └─ finalizes session state
 
 Swift macOS helper
-  ├─ preflights / requests macOS permissions
-  ├─ AVAudioEngine → mic.caf
-  └─ ScreenCaptureKit → system.caf
+  ├─ preflights / requests only the permissions needed by the mode
+  ├─ AVAudioEngine → mic.caf when microphone capture is enabled
+  └─ ScreenCaptureKit → system.caf when system capture is enabled
 
 Completed session → TranscriptionEngine trait → transcript.md + transcript.json
 ```
 
-The helper receives a tiny line-based protocol: `check-permissions`, `request-permissions`, and `record <session-folder>`. During recording Rust sends `stop` on standard input; it does not force-kill the helper.
+The helper receives a tiny line-based protocol: `check-permissions [mode]`,
+`request-permissions [mode]`, and `record <session-folder> <mode>`. During
+recording Rust sends `stop` on standard input; it does not force-kill the helper.
 
 ## Source layout
 

@@ -1,10 +1,45 @@
 use std::{
     collections::HashMap,
-    env, fmt, io,
+    env,
+    ffi::OsString,
+    fmt, io,
     io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureMode {
+    System,
+    Microphone,
+    Both,
+}
+
+impl CaptureMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Microphone => "microphone",
+            Self::Both => "both",
+        }
+    }
+
+    pub fn requires_microphone(self) -> bool {
+        matches!(self, Self::Microphone | Self::Both)
+    }
+
+    pub fn requires_screen_recording(self) -> bool {
+        matches!(self, Self::System | Self::Both)
+    }
+
+    pub fn output_files(self) -> Vec<&'static str> {
+        match self {
+            Self::System => vec!["system.caf"],
+            Self::Microphone => vec!["mic.caf"],
+            Self::Both => vec!["system.caf", "mic.caf"],
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PermissionStatus {
@@ -13,17 +48,18 @@ pub struct PermissionStatus {
 }
 
 impl PermissionStatus {
-    pub fn is_ready_to_record(&self) -> bool {
-        self.microphone == "granted" && self.screen_recording == "granted"
+    pub fn is_ready_to_record(&self, mode: CaptureMode) -> bool {
+        (!mode.requires_microphone() || self.microphone == "granted")
+            && (!mode.requires_screen_recording() || self.screen_recording == "granted")
     }
 
-    pub fn guidance(&self) -> String {
+    pub fn guidance(&self, mode: CaptureMode) -> String {
         let mut missing = Vec::new();
 
-        if self.microphone != "granted" {
+        if mode.requires_microphone() && self.microphone != "granted" {
             missing.push("Microphone");
         }
-        if self.screen_recording != "granted" {
+        if mode.requires_screen_recording() && self.screen_recording != "granted" {
             missing.push("Screen Recording");
         }
 
@@ -74,8 +110,20 @@ impl fmt::Display for HelperError {
     }
 }
 
+impl HelperError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::Failed {
+                status: Some(status),
+                ..
+            } if *status == 64 || *status == 77 => *status,
+            _ => 1,
+        }
+    }
+}
+
 /// Starts the native macOS helper and reads its permission preflight result.
-pub fn check_permissions() -> Result<PermissionStatus, HelperError> {
+pub fn check_permissions(mode: CaptureMode) -> Result<PermissionStatus, HelperError> {
     let helper_path = helper_path();
     if !helper_path.is_file() {
         return Err(HelperError::Missing(helper_path));
@@ -83,6 +131,7 @@ pub fn check_permissions() -> Result<PermissionStatus, HelperError> {
 
     let output = Command::new(helper_path)
         .arg("check-permissions")
+        .arg(mode.as_str())
         .stdin(Stdio::null())
         .output()
         .map_err(HelperError::Launch)?;
@@ -97,16 +146,42 @@ pub fn check_permissions() -> Result<PermissionStatus, HelperError> {
     parse_permission_status(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Starts both native capture streams and waits for the helper's ready signal.
-pub fn start_capture(session_folder: &std::path::Path) -> Result<CaptureProcess, HelperError> {
+/// Requests only the permissions needed by the selected capture mode.
+pub fn request_permissions(mode: CaptureMode) -> Result<PermissionStatus, HelperError> {
+    let helper_path = helper_path();
+    if !helper_path.is_file() {
+        return Err(HelperError::Missing(helper_path));
+    }
+
+    let output = Command::new(helper_path)
+        .arg("request-permissions")
+        .arg(mode.as_str())
+        .stdin(Stdio::null())
+        .output()
+        .map_err(HelperError::Launch)?;
+
+    if !output.status.success() {
+        return Err(HelperError::Failed {
+            status: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+
+    parse_permission_status(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Starts the selected native capture streams and waits for the helper's ready signal.
+pub fn start_capture(
+    session_folder: &std::path::Path,
+    mode: CaptureMode,
+) -> Result<CaptureProcess, HelperError> {
     let helper_path = helper_path();
     if !helper_path.is_file() {
         return Err(HelperError::Missing(helper_path));
     }
 
     let mut child = Command::new(helper_path)
-        .arg("record")
-        .arg(session_folder)
+        .args(record_arguments(session_folder, mode))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -132,6 +207,14 @@ pub fn start_capture(session_folder: &std::path::Path) -> Result<CaptureProcess,
     }
 
     Ok(CaptureProcess { child, stdin })
+}
+
+fn record_arguments(session_folder: &Path, mode: CaptureMode) -> Vec<OsString> {
+    vec![
+        OsString::from("record"),
+        session_folder.as_os_str().to_owned(),
+        OsString::from(mode.as_str()),
+    ]
 }
 
 impl CaptureProcess {
@@ -209,7 +292,8 @@ fn required_value<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_permission_status;
+    use super::{parse_permission_status, record_arguments, CaptureMode, PermissionStatus};
+    use std::path::Path;
 
     #[test]
     fn parses_a_permission_response_from_the_helper() {
@@ -220,12 +304,54 @@ mod tests {
 
         assert_eq!(result.microphone, "granted");
         assert_eq!(result.screen_recording, "missing");
-        assert!(!result.is_ready_to_record());
-        assert!(result.guidance().contains("Screen Recording"));
+        assert!(!result.is_ready_to_record(CaptureMode::Both));
+        assert!(result.is_ready_to_record(CaptureMode::Microphone));
+        assert!(result
+            .guidance(CaptureMode::Both)
+            .contains("Screen Recording"));
     }
 
     #[test]
     fn rejects_an_incomplete_helper_response() {
         assert!(parse_permission_status("RESULT permission-status\n").is_err());
+    }
+
+    #[test]
+    fn maps_capture_modes_to_helper_values_and_track_files() {
+        assert_eq!(CaptureMode::System.as_str(), "system");
+        assert_eq!(CaptureMode::Microphone.as_str(), "microphone");
+        assert_eq!(CaptureMode::Both.as_str(), "both");
+        assert_eq!(CaptureMode::System.output_files(), vec!["system.caf"]);
+        assert_eq!(CaptureMode::Microphone.output_files(), vec!["mic.caf"]);
+        assert_eq!(
+            CaptureMode::Both.output_files(),
+            vec!["system.caf", "mic.caf"]
+        );
+    }
+
+    #[test]
+    fn passes_the_selected_mode_to_the_helper_record_command() {
+        let arguments = record_arguments(Path::new("/tmp/session"), CaptureMode::Both);
+        assert_eq!(arguments[0], "record");
+        assert_eq!(arguments[1], "/tmp/session");
+        assert_eq!(arguments[2], "both");
+    }
+
+    #[test]
+    fn permission_requirements_are_mode_specific() {
+        let permissions = PermissionStatus {
+            microphone: "missing".to_string(),
+            screen_recording: "granted".to_string(),
+        };
+
+        assert!(permissions.is_ready_to_record(CaptureMode::System));
+        assert!(!permissions.is_ready_to_record(CaptureMode::Microphone));
+        assert!(!permissions.is_ready_to_record(CaptureMode::Both));
+        assert!(permissions
+            .guidance(CaptureMode::Microphone)
+            .contains("Microphone"));
+        assert!(!permissions
+            .guidance(CaptureMode::System)
+            .contains("Microphone"));
     }
 }

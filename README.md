@@ -16,17 +16,23 @@ Always get the consent of everyone being recorded and follow the laws and polici
 
 This is a learning-by-building project. We will build one small, understandable piece at a time instead of starting with a large, complex application.
 
-## Current phase: two-track recording, ready for hardware validation
+## Current phase: selectable audio capture, ready for hardware validation
 
 `rusteze start [title]` creates a self-contained session folder under
 `~/Documents/rusteze/meetings`, asks the included native macOS helper to check
-Microphone and Screen Recording access, records the lifecycle in `session.json`,
-starts separate microphone and system-audio tracks, and stops cleanly with
-`Ctrl+C`.
+the permissions required by the selected capture mode, records the lifecycle in
+`session.json`, and stops cleanly with `Ctrl+C`.
 
 ```bash
-cargo run -- start "Rust workshop"
+cargo run -- start "Rust workshop"            # system audio only (default)
+cargo run -- start "Rust workshop" --mic      # system audio + microphone
+cargo run -- start "Rust workshop" --mic-only # microphone only
 ```
+
+System-only capture needs Screen Recording/System Audio access. Microphone-only
+capture needs Microphone access. `--mic` requires both. Use
+`rusteze request-permissions`, with the same optional mode flag, to request only
+the permissions needed for that workflow.
 
 The session progresses from `recording` to `stopping` to `completed`. If the
 program cannot continue normally, `session.json` records a `failed` state and
@@ -46,16 +52,18 @@ before running `start`:
 ./macos-helper/build.sh
 ```
 
-Its current `check-permissions` protocol is the boundary Rust uses for capture.
-It records separate `mic.caf` and `system.caf` tracks and finalizes both when
-`rusteze` receives `Ctrl+C`. Set `RUSTEZE_CAPTURE_HELPER` to use a helper binary
-at another path during development.
+Its `check-permissions [mode]`, `request-permissions [mode]`, and
+`record SESSION_FOLDER mode` protocols are the boundary Rust uses for capture.
+System-only sessions contain `system.caf`, microphone-only sessions contain
+`mic.caf`, and `--mic` sessions contain both separate files. Set
+`RUSTEZE_CAPTURE_HELPER` to use a helper binary at another path during
+development.
 
-Before recording, allow the helper under **Microphone** and **Screen Recording**
-in System Settings. You can request the initial macOS prompts with:
+Before recording, allow the helper under the relevant sections of **System
+Settings → Privacy & Security**. You can request the initial macOS prompts with:
 
 ```bash
-./macos-helper/.build/debug/rusteze-capture-helper request-permissions
+./macos-helper/.build/debug/rusteze-capture-helper request-permissions system
 ```
 
 `rusteze transcribe <session-path>` is present as the model-independent
@@ -86,7 +94,8 @@ Not in the first version:
 ## Planned command shape
 
 ```text
-rusteze start [title]
+rusteze start [title] [--mic|--mic-only]
+rusteze request-permissions [--mic|--mic-only]
 rusteze create-meeting [title]
 rusteze transcribe <session-path>
 ```

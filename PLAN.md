@@ -92,10 +92,11 @@ macOS continuously gives the helper tiny new pieces of microphone and system aud
 
 ## Permissions and Packaging
 
-Before recording, the finished app needs two macOS permissions:
+Before recording, the finished app needs the permissions required by the selected
+capture mode:
 
-1. **Microphone access** to capture the user's voice.
-2. **Screen Recording access** to capture meeting playback/system audio.
+1. **Microphone access** for microphone-only or combined capture.
+2. **Screen Recording access** for system-only or combined capture.
 
 Rusteze stays terminal-first, but the finished project should be packaged and signed as a small macOS app/helper. That gives macOS a stable identity for privacy permissions and makes installation on another Mac reliable.
 
@@ -114,10 +115,10 @@ Every meeting is a self-contained local folder.
   transcript.json             # timestamps and structured segments
 ```
 
-Current recordings use `mic.caf` and `system.caf`. `session.json` currently
-stores the session ID, title, lifecycle state, start/end times, duration, and a
-recoverable failure reason. Device names and track details are planned metadata
-extensions.
+Sessions contain only the enabled `mic.caf` and/or `system.caf` track. The
+mode-aware `session.json` stores the session ID, title, lifecycle state,
+capture mode, enabled tracks, start/end times, duration, and a recoverable
+failure reason.
 
 Keep microphone and system audio as separate tracks initially. This avoids premature mixing problems and leaves room for better playback, transcript alignment, or speaker work later.
 
