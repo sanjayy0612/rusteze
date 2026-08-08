@@ -160,6 +160,7 @@ fn start_recording(title: &str, mode: CaptureMode) {
         // Signal handlers must stay small. The main thread owns finalization.
         let _ = shutdown_sender.send(());
     }) {
+        let _ = capture.stop();
         let _ = meeting::fail(&mut session, "Could not install Ctrl+C handler");
         eprintln!("Could not listen for Ctrl+C: {error}");
         process::exit(1);
@@ -170,7 +171,9 @@ fn start_recording(title: &str, mode: CaptureMode) {
             Ok(()) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Err(error) = capture.check_health() {
-                    fail_and_exit(&mut session, &error.to_string());
+                    let reason = error.to_string();
+                    let _ = capture.stop();
+                    fail_and_exit(&mut session, &reason);
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {

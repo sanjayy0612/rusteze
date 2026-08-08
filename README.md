@@ -1,12 +1,12 @@
 # rusteze
 
-A local-first macOS command-line tool for recording meeting audio, transcribing it on your laptop, and optionally creating a summary.
+A local-first macOS and Windows command-line tool for recording meeting audio, transcribing it on your laptop, and optionally creating a summary.
 
 ## Why it exists
 
 Meeting tools often require a bot, a paid plan, or uploading audio to someone else's servers. `rusteze` aims to keep control with you:
 
-- capture meeting audio directly on your Mac;
+- capture meeting audio directly on your Mac or Windows PC;
 - keep recordings and transcription local;
 - only send transcript text to an LLM if you explicitly ask for a summary.
 
@@ -16,7 +16,7 @@ Always get the consent of everyone being recorded and follow the laws and polici
 
 This is a learning-by-building project. We will build one small, understandable piece at a time instead of starting with a large, complex application.
 
-## Current phase: selectable audio capture, ready for hardware validation
+## Current phase: selectable audio capture, ready for macOS/Windows hardware validation
 
 `rusteze start [title]` creates a self-contained session folder under
 `~/Documents/rusteze/meetings`, asks the included native macOS helper to check
@@ -45,8 +45,8 @@ Before capture begins, Rusteze requires 256 MiB of free disk space. On the next
 crash/interruption as `failed` while preserving the audio that was already
 written.
 
-The helper source lives at `macos-helper/Sources/main.swift`. Build it once
-before running `start`:
+On macOS, the helper source lives at `macos-helper/Sources/main.swift`. Build it
+once before running `start`:
 
 ```bash
 ./macos-helper/build.sh
@@ -70,6 +70,25 @@ Settings → Privacy & Security**. You can request the initial macOS prompts wit
 transcription boundary. It intentionally reports that no engine is configured
 until a local engine (such as whisper.cpp) is selected and implemented.
 
+On Windows, Rusteze uses native WASAPI directly from Rust. System capture uses
+the default render endpoint in loopback mode and microphone capture uses the
+default capture endpoint. Windows recordings are written as `system.wav` and
+`mic.wav`; macOS recordings remain CAF files.
+
+Windows development builds require a Windows Rust toolchain:
+
+```powershell
+cargo build
+cargo build --release
+```
+
+macOS regression build:
+
+```bash
+cargo build
+./macos-helper/build.sh
+```
+
 ## Local model setup
 
 Rusteze uses the native `whisper.cpp` runtime rather than Python or a virtual
@@ -89,7 +108,7 @@ Not in the first version:
 - background daemon support;
 - transcription or LLM summaries;
 - per-app audio capture;
-- Windows or Linux support.
+- Linux support.
 
 ## Planned command shape
 

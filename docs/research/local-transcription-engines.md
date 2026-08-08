@@ -65,7 +65,8 @@ Sources: [MLX](https://github.com/ml-explore/mlx), [MLX Whisper](https://github.
 
 ## Recording-specific boundary
 
-When present, transcribe `mic.caf` and `system.caf` independently. Preserve each
+When present, transcribe the platform's microphone and system-audio files
+(`mic.caf` / `system.caf` on macOS, `mic.wav` / `system.wav` on Windows) independently. Preserve each
 segment's time range and `track`, then merge by time for the transcript files.
 Tracks distinguish
 local microphone from remote/system audio; they do not diarize individual remote

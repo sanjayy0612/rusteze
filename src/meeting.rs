@@ -80,16 +80,8 @@ impl MeetingSession {
             .capture_mode
             .map(CaptureMode::output_files)
             .unwrap_or_default();
-        let microphone_track = if enabled_files.contains(&"mic.caf") {
-            "\"mic.caf\""
-        } else {
-            "null"
-        };
-        let system_audio_track = if enabled_files.contains(&"system.caf") {
-            "\"system.caf\""
-        } else {
-            "null"
-        };
+        let microphone_track = track_json_value(&enabled_files, "mic.");
+        let system_audio_track = track_json_value(&enabled_files, "system.");
 
         format!(
             concat!(
@@ -118,6 +110,15 @@ impl MeetingSession {
             system_audio_track,
         )
     }
+}
+
+fn track_json_value(files: &[&str], prefix: &str) -> String {
+    files
+        .iter()
+        .copied()
+        .find(|file| file.starts_with(prefix))
+        .map(|file| format!("\"{file}\""))
+        .unwrap_or_else(|| "null".to_string())
 }
 
 /// Creates an idle meeting folder for the early folder-structure command.
@@ -262,11 +263,29 @@ fn available_disk_space(path: &Path) -> io::Result<u64> {
     Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn available_disk_space(path: &Path) -> io::Result<u64> {
+    use std::{iter, os::windows::ffi::OsStrExt};
+    use windows::{core::PCWSTR, Win32::Storage::FileSystem::GetDiskFreeSpaceExW};
+
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let mut available = 0u64;
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(path.as_ptr()), Some(&mut available), None, None) }
+        .map_err(|error| {
+            io::Error::other(format!("Could not determine free disk space: {error}"))
+        })?;
+    Ok(available)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn available_disk_space(_path: &Path) -> io::Result<u64> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "Rusteze recording is macOS-only.",
+        "Rusteze recording is currently supported only on macOS and Windows.",
     ))
 }
 
@@ -366,10 +385,11 @@ mod tests {
         };
 
         let json = session.json();
+        let output_files = CaptureMode::Both.output_files();
         assert!(json.contains("\"state\": \"completed\""));
         assert!(json.contains("\"capture_mode\": \"both\""));
-        assert!(json.contains("\"microphone_track\": \"mic.caf\""));
-        assert!(json.contains("\"system_audio_track\": \"system.caf\""));
+        assert!(json.contains(&format!("\"microphone_track\": \"{}\"", output_files[1])));
+        assert!(json.contains(&format!("\"system_audio_track\": \"{}\"", output_files[0])));
         assert!(json.contains("\"duration_seconds\": 25"));
         assert!(json.contains("A \\\"quoted\\\" meeting"));
     }
@@ -388,10 +408,11 @@ mod tests {
         };
 
         let json = session.json();
+        let system_file = CaptureMode::System.output_files()[0];
         assert!(json.contains("\"capture_mode\": \"system\""));
         assert!(json.contains("\"microphone_track\": null"));
-        assert!(json.contains("\"system_audio_track\": \"system.caf\""));
-        assert!(!json.contains("mic.caf"));
+        assert!(json.contains(&format!("\"system_audio_track\": \"{}\"", system_file)));
+        assert!(!json.contains(CaptureMode::Microphone.output_files()[0]));
     }
 
     #[test]

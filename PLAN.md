@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Rusteze is a personal, **local-first macOS CLI** for recording meetings and turning completed recordings into local transcripts.
+Rusteze is a personal, **local-first macOS and Windows CLI** for recording meetings and turning completed recordings into local transcripts.
 
 It is a Rust learning project as well as a useful tool. The core program owns meeting capture, session folders, metadata, and transcription orchestration. It does **not** contain AI-agent, Notion, Obsidian, or cloud-provider code.
 
@@ -34,7 +34,7 @@ Later, an external AI agent may read a transcript and create summaries or publis
 
 ### Included
 
-- macOS only
+- macOS and Windows capture backends
 - Terminal-first workflow
 - Foreground recording with clean `Ctrl+C` shutdown
 - Microphone capture as one track
@@ -55,25 +55,28 @@ Later, an external AI agent may read a transcript and create summaries or publis
 - Multi-speaker diarization
 - Background daemon recording
 - GUI application
-- Windows or Linux support
+- Linux support
 - Homebrew packaging
 
 ## Architecture
 
-Rusteze has two cooperating parts.
+Rusteze has a Rust CLI and a platform-specific capture backend.
 
 ```text
-Rust CLI                         Native macOS capture helper
----------                        ---------------------------
-commands and session state       requests macOS permissions
-meeting folders and metadata     captures microphone audio
-Ctrl+C / graceful shutdown       captures system audio
-transcription orchestration      delivers audio to the session writer
+Rust CLI                         Capture backend
+--------                         ---------------
+commands and session state       macOS: Swift helper
+meeting folders and metadata     Windows: native WASAPI
+Ctrl+C / graceful shutdown       captures microphone audio
+transcription orchestration      captures system audio
 ```
 
 The Rust CLI is the project brain. It owns the command-line UX, creates sessions, tracks recording state, writes metadata, and later invokes a local transcription engine.
 
-The native helper is the macOS specialist. It uses Apple-supported frameworks instead of Rusteze speaking directly to hardware drivers.
+The macOS helper uses Apple-supported frameworks instead of Rusteze speaking
+directly to hardware drivers. The Windows backend uses shared-mode WASAPI with
+the default render endpoint in loopback mode and the default capture endpoint
+for microphone input.
 
 | Rusteze need | macOS responsibility |
 |---|---|
@@ -115,10 +118,11 @@ Every meeting is a self-contained local folder.
   transcript.json             # timestamps and structured segments
 ```
 
-Sessions contain only the enabled `mic.caf` and/or `system.caf` track. The
-mode-aware `session.json` stores the session ID, title, lifecycle state,
-capture mode, enabled tracks, start/end times, duration, and a recoverable
-failure reason.
+Sessions contain only the enabled microphone and/or system-audio track. macOS
+uses `mic.caf` / `system.caf`; Windows uses `mic.wav` / `system.wav`. The
+mode-aware `session.json` stores the session ID, title, lifecycle state, capture
+mode, enabled tracks, start/end times, duration, and a recoverable failure
+reason.
 
 Keep microphone and system audio as separate tracks initially. This avoids premature mixing problems and leaves room for better playback, transcript alignment, or speaker work later.
 

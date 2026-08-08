@@ -1,12 +1,27 @@
+use std::fmt;
+
+#[cfg(target_os = "macos")]
 use std::{
     collections::HashMap,
     env,
     ffi::OsString,
-    fmt, io,
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    io::{self, BufRead, BufReader, Write},
+    path::Path,
+    path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
 };
+
+#[cfg(target_os = "windows")]
+#[path = "windows.rs"]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::{check_permissions, request_permissions, start_capture};
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[path = "unsupported.rs"]
+mod unsupported;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub use unsupported::{check_permissions, request_permissions, start_capture};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureMode {
@@ -33,6 +48,16 @@ impl CaptureMode {
     }
 
     pub fn output_files(self) -> Vec<&'static str> {
+        #[cfg(target_os = "windows")]
+        {
+            match self {
+                Self::System => vec!["system.wav"],
+                Self::Microphone => vec!["mic.wav"],
+                Self::Both => vec!["system.wav", "mic.wav"],
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
         match self {
             Self::System => vec!["system.caf"],
             Self::Microphone => vec!["mic.caf"],
@@ -72,12 +97,19 @@ impl PermissionStatus {
 
 #[derive(Debug)]
 pub enum HelperError {
+    #[cfg(target_os = "macos")]
     Missing(PathBuf),
+    #[cfg(target_os = "macos")]
     Launch(io::Error),
+    #[cfg(target_os = "macos")]
     Failed { status: Option<i32>, stderr: String },
+    #[cfg(target_os = "macos")]
     InvalidResponse(String),
+    #[cfg(not(target_os = "macos"))]
+    Backend(String),
 }
 
+#[cfg(target_os = "macos")]
 pub struct CaptureProcess {
     child: Child,
     stdin: ChildStdin,
@@ -86,12 +118,15 @@ pub struct CaptureProcess {
 impl fmt::Display for HelperError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(target_os = "macos")]
             Self::Missing(path) => write!(
                 formatter,
                 "Native macOS helper was not built at {}. Run macos-helper/build.sh first.",
                 path.display()
             ),
+            #[cfg(target_os = "macos")]
             Self::Launch(error) => write!(formatter, "Could not launch macOS helper: {error}"),
+            #[cfg(target_os = "macos")]
             Self::Failed { status, stderr } => write!(
                 formatter,
                 "macOS helper exited with status {}: {}",
@@ -100,12 +135,15 @@ impl fmt::Display for HelperError {
                     .unwrap_or_else(|| "unknown".to_string()),
                 stderr.trim()
             ),
+            #[cfg(target_os = "macos")]
             Self::InvalidResponse(message) => {
                 write!(
                     formatter,
                     "macOS helper returned an invalid response: {message}"
                 )
             }
+            #[cfg(not(target_os = "macos"))]
+            Self::Backend(message) => write!(formatter, "{message}"),
         }
     }
 }
@@ -113,6 +151,7 @@ impl fmt::Display for HelperError {
 impl HelperError {
     pub fn exit_code(&self) -> i32 {
         match self {
+            #[cfg(target_os = "macos")]
             Self::Failed {
                 status: Some(status),
                 ..
@@ -123,6 +162,7 @@ impl HelperError {
 }
 
 /// Starts the native macOS helper and reads its permission preflight result.
+#[cfg(target_os = "macos")]
 pub fn check_permissions(mode: CaptureMode) -> Result<PermissionStatus, HelperError> {
     let helper_path = helper_path();
     if !helper_path.is_file() {
@@ -147,6 +187,7 @@ pub fn check_permissions(mode: CaptureMode) -> Result<PermissionStatus, HelperEr
 }
 
 /// Requests only the permissions needed by the selected capture mode.
+#[cfg(target_os = "macos")]
 pub fn request_permissions(mode: CaptureMode) -> Result<PermissionStatus, HelperError> {
     let helper_path = helper_path();
     if !helper_path.is_file() {
@@ -171,6 +212,7 @@ pub fn request_permissions(mode: CaptureMode) -> Result<PermissionStatus, Helper
 }
 
 /// Starts the selected native capture streams and waits for the helper's ready signal.
+#[cfg(target_os = "macos")]
 pub fn start_capture(
     session_folder: &std::path::Path,
     mode: CaptureMode,
@@ -209,6 +251,7 @@ pub fn start_capture(
     Ok(CaptureProcess { child, stdin })
 }
 
+#[cfg(target_os = "macos")]
 fn record_arguments(session_folder: &Path, mode: CaptureMode) -> Vec<OsString> {
     vec![
         OsString::from("record"),
@@ -217,6 +260,7 @@ fn record_arguments(session_folder: &Path, mode: CaptureMode) -> Vec<OsString> {
     ]
 }
 
+#[cfg(target_os = "macos")]
 impl CaptureProcess {
     /// Detects an unexpected helper exit, such as a capture device failure.
     pub fn check_health(&mut self) -> Result<(), HelperError> {
@@ -248,6 +292,7 @@ impl CaptureProcess {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn helper_path() -> PathBuf {
     env::var_os("RUSTEZE_CAPTURE_HELPER")
         .map(PathBuf::from)
@@ -260,6 +305,7 @@ fn helper_path() -> PathBuf {
         })
 }
 
+#[cfg(target_os = "macos")]
 fn parse_permission_status(output: &str) -> Result<PermissionStatus, HelperError> {
     let values: HashMap<_, _> = output
         .lines()
@@ -279,6 +325,7 @@ fn parse_permission_status(output: &str) -> Result<PermissionStatus, HelperError
     })
 }
 
+#[cfg(target_os = "macos")]
 fn required_value<'a>(
     values: &'a HashMap<&str, &str>,
     key: &str,
@@ -291,6 +338,7 @@ fn required_value<'a>(
 }
 
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 mod tests {
     use super::{parse_permission_status, record_arguments, CaptureMode, PermissionStatus};
     use std::path::Path;
