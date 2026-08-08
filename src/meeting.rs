@@ -1,12 +1,25 @@
 use std::{
     env, fs, io,
+    io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::native_helper::CaptureMode;
+use crate::{native_helper::CaptureMode, storage};
 
 pub const MINIMUM_FREE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_RECOVERY_METADATA_BYTES: u64 = 1024 * 1024;
+const SENSITIVE_SESSION_FILES: &[&str] = &[
+    "session.json",
+    "mic.caf",
+    "system.caf",
+    "mic.wav",
+    "system.wav",
+    "transcript.md",
+    "transcript.json",
+];
+static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionState {
@@ -134,20 +147,41 @@ pub fn start(title: &str, capture_mode: CaptureMode) -> io::Result<MeetingSessio
 
 /// Finds sessions left active by a crash and records a recoverable failure.
 pub fn recover_interrupted_sessions() -> io::Result<Vec<PathBuf>> {
-    let meetings_directory = default_meetings_directory()?;
+    let meetings_directory = ensure_meetings_directory()?;
     let mut recovered = Vec::new();
-    let entries = match fs::read_dir(meetings_directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(recovered),
-        Err(error) => return Err(error),
-    };
+    let entries = fs::read_dir(meetings_directory)?;
 
     for entry in entries {
-        let session_path = entry?.path().join("session.json");
+        let entry = entry?;
+        let entry_path = entry.path();
+        let entry_metadata = match fs::symlink_metadata(&entry_path) {
+            Ok(metadata) if metadata.is_dir() && !storage::is_link_or_reparse_point(&metadata) => {
+                metadata
+            }
+            Ok(_) => continue,
+            Err(_) => continue,
+        };
+        let _ = entry_metadata;
+        storage::enforce_private_directory(&entry_path)?;
+        harden_existing_session_files(&entry_path)?;
+
+        let session_path = entry_path.join("session.json");
+        let metadata = match fs::symlink_metadata(&session_path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !storage::is_link_or_reparse_point(&metadata)
+                    && metadata.len() <= MAX_RECOVERY_METADATA_BYTES =>
+            {
+                metadata
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        };
+        let _ = metadata;
         let contents = match fs::read_to_string(&session_path) {
             Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
+            Err(_) => continue,
         };
         let now = unix_seconds_now()?;
         let Some(recovered_json) = recover_session_json(&contents, now) else {
@@ -217,13 +251,15 @@ fn create_session(
 ) -> io::Result<MeetingSession> {
     let started_at_unix_seconds = unix_seconds_now()?;
     let meeting_name = slugify(title);
-    let meetings_directory = default_meetings_directory()?;
+    let meetings_directory = ensure_meetings_directory()?;
 
-    fs::create_dir_all(&meetings_directory)?;
-
-    let id = unique_session_id(&meetings_directory, started_at_unix_seconds, &meeting_name);
+    let (id, folder) = create_unique_session_directory(
+        &meetings_directory,
+        started_at_unix_seconds,
+        &meeting_name,
+    )?;
     let session = MeetingSession {
-        folder: meetings_directory.join(&id),
+        folder,
         id,
         title: title.to_string(),
         state: initial_state,
@@ -233,15 +269,55 @@ fn create_session(
         recovery_reason: None,
     };
 
-    fs::create_dir(&session.folder)?;
     session.save()?;
     Ok(session)
 }
 
 fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
-    let temporary_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    fs::write(&temporary_path, contents)?;
-    fs::rename(temporary_path, path)
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Metadata path has no parent directory.",
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Metadata path has no file name.",
+        )
+    })?;
+
+    for _ in 0..128 {
+        let counter = TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            file_name.to_string_lossy(),
+            std::process::id(),
+            counter
+        ));
+        let mut temporary_file = match storage::create_private_file_new(&temporary_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+
+        let result = (|| {
+            temporary_file.write_all(contents.as_bytes())?;
+            temporary_file.sync_all()?;
+            drop(temporary_file);
+            storage::replace_file_atomically(&temporary_path, path)
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        return result;
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "Could not allocate a safe temporary metadata file.",
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -315,17 +391,62 @@ fn unix_seconds_now() -> io::Result<u64> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "System clock is before 1970."))
 }
 
-fn unique_session_id(meetings_directory: &Path, created_at: u64, meeting_name: &str) -> String {
+fn create_unique_session_directory(
+    meetings_directory: &Path,
+    created_at: u64,
+    meeting_name: &str,
+) -> io::Result<(String, PathBuf)> {
     let base = format!("{created_at}-{meeting_name}");
-    let mut id = base.clone();
-    let mut duplicate_number = 2;
-
-    while meetings_directory.join(&id).exists() {
-        id = format!("{base}-{duplicate_number}");
-        duplicate_number += 1;
+    for duplicate_number in 1u64.. {
+        let id = if duplicate_number == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{duplicate_number}")
+        };
+        let folder = meetings_directory.join(&id);
+        match storage::create_private_directory(&folder) {
+            Ok(()) => return Ok((id, folder)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
     }
+    unreachable!("the session suffix space is not finite")
+}
 
-    id
+fn ensure_meetings_directory() -> io::Result<PathBuf> {
+    let meetings_directory = default_meetings_directory()?;
+    let application_directory = meetings_directory.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Meetings directory has no application parent.",
+        )
+    })?;
+    let documents_directory = application_directory.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Application directory has no Documents parent.",
+        )
+    })?;
+
+    fs::create_dir_all(documents_directory)?;
+    storage::ensure_private_directory(application_directory)?;
+    storage::ensure_private_directory(&meetings_directory)?;
+    Ok(meetings_directory)
+}
+
+fn harden_existing_session_files(session_directory: &Path) -> io::Result<()> {
+    for file_name in SENSITIVE_SESSION_FILES {
+        let path = session_directory.join(file_name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !storage::is_link_or_reparse_point(&metadata) => {
+                storage::enforce_private_file(&path)?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn default_meetings_directory() -> io::Result<PathBuf> {
@@ -376,9 +497,22 @@ fn slugify(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{recover_session_json, slugify, MeetingSession, SessionState};
+    use super::{recover_session_json, slugify, write_atomically, MeetingSession, SessionState};
     use crate::native_helper::CaptureMode;
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf, time::SystemTime};
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rusteze-meeting-test-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
 
     #[test]
     fn makes_a_simple_folder_name_from_a_title() {
@@ -442,5 +576,44 @@ mod tests {
         assert!(recovered.contains("\"ended_at_unix_seconds\": 42"));
         assert!(recovered.contains("Audio already written was preserved"));
         assert!(recover_session_json("{\"state\": \"completed\"}", 42).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_metadata_write_does_not_follow_a_predictable_temporary_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temporary_directory("symlink");
+        let metadata_path = directory.join("session.json");
+        let temporary_path =
+            metadata_path.with_extension(format!("json.{}.tmp", std::process::id()));
+        let target = directory.join("target.txt");
+        fs::write(&target, "do not replace").unwrap();
+        symlink(&target, &temporary_path).unwrap();
+
+        write_atomically(&metadata_path, "safe metadata").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "do not replace");
+        assert_eq!(fs::read_to_string(&metadata_path).unwrap(), "safe metadata");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_metadata_write_enforces_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary_directory("permissions");
+        let metadata_path = directory.join("session.json");
+        let temporary_path =
+            metadata_path.with_extension(format!("json.{}.tmp", std::process::id()));
+        fs::write(&temporary_path, "attacker-controlled temporary file").unwrap();
+        fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o666)).unwrap();
+
+        write_atomically(&metadata_path, "private metadata").unwrap();
+
+        let mode = fs::metadata(&metadata_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        fs::remove_dir_all(directory).unwrap();
     }
 }

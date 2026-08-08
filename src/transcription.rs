@@ -1,4 +1,5 @@
-use std::{error::Error, fmt, fs, io, path::Path};
+use crate::storage;
+use std::{error::Error, fmt, fs, io, io::Write, path::Path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptSegment {
@@ -56,10 +57,26 @@ pub fn write_transcript(
     session_folder: &Path,
     transcript: &Transcript,
 ) -> Result<(), TranscriptionError> {
-    fs::write(session_folder.join("transcript.md"), markdown(transcript))
-        .map_err(TranscriptionError::Storage)?;
-    fs::write(session_folder.join("transcript.json"), json(transcript))
-        .map_err(TranscriptionError::Storage)
+    write_private_new(
+        &session_folder.join("transcript.md"),
+        markdown(transcript).as_bytes(),
+    )
+    .map_err(TranscriptionError::Storage)?;
+    write_private_new(
+        &session_folder.join("transcript.json"),
+        json(transcript).as_bytes(),
+    )
+    .map_err(TranscriptionError::Storage)
+}
+
+fn write_private_new(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut file = storage::create_private_file_new(path)?;
+    let result = file.write_all(contents).and_then(|()| file.sync_all());
+    if result.is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+    result
 }
 
 fn markdown(transcript: &Transcript) -> String {

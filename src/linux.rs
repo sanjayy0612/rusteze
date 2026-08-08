@@ -422,8 +422,9 @@ fn run_capture(
     .map_err(|error| format!("Could not build PipeWire audio format: {error}"))?
     .0
     .into_inner();
-    let mut params = [Pod::from_bytes(&values)
-        .map_err(|error| format!("Could not encode PipeWire audio format: {error}"))?];
+    let mut params = [Pod::from_bytes(&values).ok_or_else(|| {
+        "Could not encode PipeWire audio format: serialized POD was invalid".to_string()
+    })?];
 
     stream
         .connect(
@@ -502,6 +503,7 @@ fn writer_loop(
                 if let Err(error) = writer.write_samples(&samples) {
                     let message = format!("Could not write {}: {error}", path.display());
                     let _ = control_sender.send(Control::Error(message.clone()));
+                    let _ = writer.finish();
                     return Err(message);
                 }
             }

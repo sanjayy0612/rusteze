@@ -23,6 +23,39 @@ enum CaptureMode: String {
     }
 }
 
+final class CaptureState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopRequested = false
+    private var failureMessage: String?
+
+    func requestStop() {
+        lock.lock()
+        stopRequested = true
+        lock.unlock()
+    }
+
+    func fail(_ message: String) {
+        lock.lock()
+        if failureMessage == nil {
+            failureMessage = message
+        }
+        lock.unlock()
+    }
+
+    func snapshot() -> (stopRequested: Bool, failureMessage: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (stopRequested, failureMessage)
+    }
+}
+
+func enforcePrivatePermissions(for url: URL, directory: Bool = false) throws {
+    try FileManager.default.setAttributes(
+        [.posixPermissions: directory ? 0o700 : 0o600],
+        ofItemAtPath: url.path
+    )
+}
+
 func microphonePermission() -> MicrophonePermission {
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
     case .authorized: return .granted
@@ -79,8 +112,13 @@ enum CaptureError: LocalizedError {
 
 final class MicrophoneRecorder {
     private let engine = AVAudioEngine()
+    private let state: CaptureState
     private var inputNode: AVAudioInputNode?
     private var audioFile: AVAudioFile?
+
+    init(state: CaptureState) {
+        self.state = state
+    }
 
     func start(outputURL: URL) throws {
         let input = engine.inputNode
@@ -89,12 +127,16 @@ final class MicrophoneRecorder {
             throw CaptureError.unavailableMicrophone
         }
 
-        audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings)
+        let audioFile = try AVAudioFile(forWriting: outputURL, settings: format.settings)
+        try enforcePrivatePermissions(for: outputURL)
+        self.audioFile = audioFile
         input.installTap(onBus: 0, bufferSize: 4_096, format: format) { [weak self] buffer, _ in
             do {
                 try self?.audioFile?.write(from: buffer)
             } catch {
-                fputs("Microphone write failed: \(error.localizedDescription)\n", stderr)
+                let message = "Microphone write failed: \(error.localizedDescription)"
+                self?.state.fail(message)
+                fputs("\(message)\n", stderr)
             }
         }
         inputNode = input
@@ -110,13 +152,16 @@ final class MicrophoneRecorder {
 
 final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private let outputURL: URL
+    private let state: CaptureState
     private let queue = DispatchQueue(label: "dev.rusteze.system-audio")
     private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var writerInput: AVAssetWriterInput?
+    private var started = false
 
-    init(outputURL: URL) {
+    init(outputURL: URL, state: CaptureState) {
         self.outputURL = outputURL
+        self.state = state
     }
 
     func start() async throws {
@@ -135,19 +180,37 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
         self.stream = stream
         try await stream.startCapture()
+        started = true
     }
 
     func stop() async {
-        try? await stream?.stopCapture()
+        if let stream {
+            do {
+                try await stream.stopCapture()
+            } catch {
+                state.fail("System-audio capture could not stop cleanly: \(error.localizedDescription)")
+            }
+        }
         writerInput?.markAsFinished()
         if let writer {
-            await withCheckedContinuation { continuation in
-                writer.finishWriting { continuation.resume() }
+            if writer.status == .writing {
+                await withCheckedContinuation { continuation in
+                    writer.finishWriting { continuation.resume() }
+                }
             }
+            if writer.status != .completed {
+                state.fail(
+                    writer.error?.localizedDescription
+                        ?? "System-audio file could not be finalized."
+                )
+            }
+        } else if started {
+            state.fail("System-audio capture ended before any audio samples were written.")
         }
         stream = nil
         writer = nil
         writerInput = nil
+        started = false
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -155,12 +218,16 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             try write(sampleBuffer)
         } catch {
-            fputs("System-audio write failed: \(error.localizedDescription)\n", stderr)
+            let message = "System-audio write failed: \(error.localizedDescription)"
+            state.fail(message)
+            fputs("\(message)\n", stderr)
         }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        fputs("System-audio capture stopped: \(error.localizedDescription)\n", stderr)
+        let message = "System-audio capture stopped: \(error.localizedDescription)"
+        state.fail(message)
+        fputs("\(message)\n", stderr)
     }
 
     private func write(_ sampleBuffer: CMSampleBuffer) throws {
@@ -177,24 +244,43 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             guard newWriter.startWriting() else {
                 throw CaptureError.writer(newWriter.error?.localizedDescription ?? "Cannot start system-audio file.")
             }
+            do {
+                try enforcePrivatePermissions(for: outputURL)
+            } catch {
+                newWriter.cancelWriting()
+                throw error
+            }
             newWriter.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             writer = newWriter
             writerInput = newInput
         }
-        if writerInput?.isReadyForMoreMediaData == true {
-            _ = writerInput?.append(sampleBuffer)
+        guard writerInput?.isReadyForMoreMediaData == true else {
+            throw CaptureError.writer("System-audio writer could not keep up with the capture stream.")
+        }
+        guard writerInput?.append(sampleBuffer) == true else {
+            throw CaptureError.writer(
+                writer?.error?.localizedDescription ?? "System-audio sample could not be written."
+            )
         }
     }
 }
 
 final class CaptureController {
+    private let state: CaptureState
     private var microphone: MicrophoneRecorder?
     private var systemAudio: SystemAudioRecorder?
+
+    init(state: CaptureState) {
+        self.state = state
+    }
 
     func start(in folder: URL, mode: CaptureMode) async throws {
         switch mode {
         case .systemOnly:
-            let systemAudio = SystemAudioRecorder(outputURL: folder.appendingPathComponent("system.caf"))
+            let systemAudio = SystemAudioRecorder(
+                outputURL: folder.appendingPathComponent("system.caf"),
+                state: state
+            )
             do {
                 try await systemAudio.start()
                 self.systemAudio = systemAudio
@@ -203,7 +289,7 @@ final class CaptureController {
                 throw error
             }
         case .microphoneOnly:
-            let microphone = MicrophoneRecorder()
+            let microphone = MicrophoneRecorder(state: state)
             do {
                 try microphone.start(outputURL: folder.appendingPathComponent("mic.caf"))
                 self.microphone = microphone
@@ -212,7 +298,7 @@ final class CaptureController {
                 throw error
             }
         case .both:
-            let microphone = MicrophoneRecorder()
+            let microphone = MicrophoneRecorder(state: state)
             do {
                 try microphone.start(outputURL: folder.appendingPathComponent("mic.caf"))
             } catch {
@@ -221,7 +307,10 @@ final class CaptureController {
             }
             self.microphone = microphone
 
-            let systemAudio = SystemAudioRecorder(outputURL: folder.appendingPathComponent("system.caf"))
+            let systemAudio = SystemAudioRecorder(
+                outputURL: folder.appendingPathComponent("system.caf"),
+                state: state
+            )
             do {
                 try await systemAudio.start()
                 self.systemAudio = systemAudio
@@ -255,16 +344,37 @@ func record(folderPath: String, modeValue: String) async -> Int32 {
         return 77
     }
 
-    let controller = CaptureController()
+    let state = CaptureState()
+    let controller = CaptureController(state: state)
     do {
-        try await controller.start(in: URL(fileURLWithPath: folderPath), mode: mode)
+        let folder = URL(fileURLWithPath: folderPath)
+        try enforcePrivatePermissions(for: folder, directory: true)
+        try await controller.start(in: folder, mode: mode)
         print("RESULT recording-started")
         fflush(stdout)
-        while let command = readLine() {
-            if command == "stop" { break }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            while let command = readLine() {
+                if command == "stop" {
+                    state.requestStop()
+                    return
+                }
+            }
+            state.requestStop()
+        }
+
+        while true {
+            let snapshot = state.snapshot()
+            if snapshot.stopRequested || snapshot.failureMessage != nil {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
         await controller.stop()
-        print("RESULT recording-stopped")
+        if let failure = state.snapshot().failureMessage {
+            fputs("Recording failed: \(failure)\n", stderr)
+            return 1
+        }
         return 0
     } catch {
         fputs("Recording could not start: \(error.localizedDescription)\n", stderr)

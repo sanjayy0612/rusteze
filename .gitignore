@@ -11,3 +11,9 @@ recordings/
 # Whisper models
 models/
 /tools/whisper.cpp/
+
+# Agent-maintained project notes
+AGENT.md
+CONTEXT.md
+ARCHITECTURE.md
+/docs

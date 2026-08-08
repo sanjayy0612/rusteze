@@ -1,12 +1,19 @@
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 mod audio;
 mod meeting;
 mod native_helper;
+mod storage;
 mod transcription;
 
 use native_helper::CaptureMode;
-use std::{env, process, sync::mpsc, time::Duration};
+use std::{
+    env, process,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 use transcription::TranscriptionEngine;
+
+const RECORDING_SPACE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 fn main() {
     let mut arguments = env::args().skip(1);
@@ -168,6 +175,7 @@ fn start_recording(title: &str, mode: CaptureMode) {
         process::exit(1);
     }
 
+    let mut last_space_check = Instant::now();
     loop {
         match shutdown_receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(()) => break,
@@ -176,6 +184,21 @@ fn start_recording(title: &str, mode: CaptureMode) {
                     let reason = error.to_string();
                     let _ = capture.stop();
                     fail_and_exit(&mut session, &reason);
+                }
+
+                if last_space_check.elapsed() >= RECORDING_SPACE_CHECK_INTERVAL {
+                    if let Err(error) = meeting::ensure_recording_space(&session) {
+                        let mut reason = format!(
+                            "Recording stopped before the disk reserve was exhausted: {error}"
+                        );
+                        if let Err(stop_error) = capture.stop() {
+                            reason.push_str(&format!(
+                                " The audio backend also failed to finalize: {stop_error}"
+                            ));
+                        }
+                        fail_and_exit(&mut session, &reason);
+                    }
+                    last_space_check = Instant::now();
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
