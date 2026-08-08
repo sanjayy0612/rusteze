@@ -433,97 +433,70 @@ func mix(folderPath: String) async -> Int32 {
             }
         }
 
-        let composition = AVMutableComposition()
-        var parameters = [AVMutableAudioMixInputParameters]()
-        for inputURL in inputURLs {
-            let asset = AVURLAsset(url: inputURL)
-            guard let sourceTrack = try await asset.loadTracks(withMediaType: .audio).first,
-                  let compositionTrack = composition.addMutableTrack(
-                    withMediaType: .audio,
-                    preferredTrackID: kCMPersistentTrackID_Invalid
-                  ) else {
-                throw CaptureError.writer("No readable audio track was found in \(inputURL.lastPathComponent).")
-            }
-            let duration = try await asset.load(.duration)
-            try compositionTrack.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration),
-                of: sourceTrack,
-                at: .zero
-            )
-            let inputParameters = AVMutableAudioMixInputParameters(track: compositionTrack)
-            inputParameters.setVolume(0.5, at: .zero)
-            parameters.append(inputParameters)
+        let files = try inputURLs.map { try AVAudioFile(forReading: $0) }
+        guard let outputFormat = AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 2
+        ) else {
+            throw CaptureError.writer("Could not create the mixed-audio PCM format.")
         }
-
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 2,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false,
-        ]
-        let mix = AVMutableAudioMix()
-        mix.inputParameters = parameters
-        let reader = try AVAssetReader(asset: composition)
-        let readerOutput = AVAssetReaderAudioMixOutput(
-            audioTracks: composition.tracks(withMediaType: .audio),
-            audioSettings: settings
+        let engine = AVAudioEngine()
+        let players = files.map { _ in AVAudioPlayerNode() }
+        for (player, file) in zip(players, files) {
+            engine.attach(player)
+            engine.connect(player, to: engine.mainMixerNode, format: file.processingFormat)
+            player.volume = 0.5
+        }
+        try engine.enableManualRenderingMode(
+            .offline,
+            format: outputFormat,
+            maximumFrameCount: 4_096
         )
-        readerOutput.audioMix = mix
-        guard reader.canAdd(readerOutput) else {
-            throw CaptureError.writer("Cannot configure the mixed-audio reader.")
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: engine.manualRenderingFormat,
+            frameCapacity: engine.manualRenderingMaximumFrameCount
+        ) else {
+            throw CaptureError.writer("Could not allocate the mixed-audio render buffer.")
         }
-        reader.add(readerOutput)
-
-        let writer = try AVAssetWriter(outputURL: temporary, fileType: .caf)
-        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
-        guard writer.canAdd(writerInput) else {
-            throw CaptureError.writer("Cannot configure the mixed-audio writer.")
-        }
-        writer.add(writerInput)
-        guard writer.startWriting(), reader.startReading() else {
-            throw CaptureError.writer(
-                writer.error?.localizedDescription
-                    ?? reader.error?.localizedDescription
-                    ?? "Could not start audio mixing."
-            )
-        }
+        var outputFile: AVAudioFile? = try AVAudioFile(
+            forWriting: temporary,
+            settings: outputFormat.settings
+        )
         try enforcePrivatePermissions(for: temporary)
-        writer.startSession(atSourceTime: .zero)
+        let outputFrames: AVAudioFramePosition = files.map { file -> AVAudioFramePosition in
+            let duration = Double(file.length) / file.processingFormat.sampleRate
+            return AVAudioFramePosition(ceil(duration * outputFormat.sampleRate))
+        }.max() ?? 0
+        for (player, file) in zip(players, files) {
+            player.scheduleFile(file, at: nil, completionHandler: nil)
+        }
+        try engine.start()
+        players.forEach { $0.play() }
         var nextSpaceCheck = Date().addingTimeInterval(5)
 
-        while reader.status == .reading {
+        while engine.manualRenderingSampleTime < outputFrames {
             if Date() >= nextSpaceCheck {
                 try ensureRecordingSpace(at: folder)
                 nextSpaceCheck = Date().addingTimeInterval(5)
             }
-            if writerInput.isReadyForMoreMediaData {
-                guard let sample = readerOutput.copyNextSampleBuffer() else { break }
-                guard writerInput.append(sample) else {
-                    throw CaptureError.writer(
-                        writer.error?.localizedDescription ?? "Could not write mixed audio."
-                    )
-                }
-            } else {
-                try await Task.sleep(nanoseconds: 1_000_000)
+            let remaining = outputFrames - engine.manualRenderingSampleTime
+            let framesToRender = AVAudioFrameCount(
+                min(AVAudioFramePosition(buffer.frameCapacity), remaining)
+            )
+            switch try engine.renderOffline(framesToRender, to: buffer) {
+            case .success:
+                try outputFile?.write(from: buffer)
+            case .insufficientDataFromInputNode, .cannotDoInCurrentContext:
+                continue
+            case .error:
+                throw CaptureError.writer("AVAudioEngine could not render the mixed track.")
+            @unknown default:
+                throw CaptureError.writer("AVAudioEngine returned an unknown rendering status.")
             }
         }
-        guard reader.status == .completed else {
-            throw CaptureError.writer(
-                reader.error?.localizedDescription ?? "Could not read both source tracks."
-            )
-        }
-        writerInput.markAsFinished()
-        await withCheckedContinuation { continuation in
-            writer.finishWriting { continuation.resume() }
-        }
-        guard writer.status == .completed else {
-            throw CaptureError.writer(
-                writer.error?.localizedDescription ?? "Could not finalize mixed audio."
-            )
-        }
+        players.forEach { $0.stop() }
+        engine.stop()
+        outputFile = nil
 
         if fileManager.fileExists(atPath: destination.path) {
             _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
@@ -532,9 +505,18 @@ func mix(folderPath: String) async -> Int32 {
         }
         try enforcePrivatePermissions(for: destination)
         return 0
+    } catch CaptureError.writer(let reason) {
+        try? fileManager.removeItem(at: temporary)
+        fputs("Audio mixing failed: \(reason)\n", stderr)
+        return 1
     } catch {
         try? fileManager.removeItem(at: temporary)
-        fputs("Audio mixing failed: \(error.localizedDescription)\n", stderr)
+        let details = error as NSError
+        fputs(
+            "Audio mixing failed: \(error.localizedDescription) "
+                + "[\(details.domain) \(details.code)] \(details.userInfo)\n",
+            stderr
+        )
         return 1
     }
 }

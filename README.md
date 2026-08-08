@@ -3,7 +3,7 @@
 
   <h1>Rusteze</h1>
 
-  <p><strong>Local-first meeting recording for macOS, Windows, and Linux.</strong></p>
+  <p><strong>Local-first audio capture for meetings and system audio.</strong></p>
   <p>Capture the room. Keep the files. Stay in control.</p>
 
   <p>
@@ -14,9 +14,13 @@
   </p>
 </div>
 
-Rusteze is a local-first meeting recorder written in Rust. It captures system audio, microphone audio, or both, preserves the source tracks, creates a post-recording mix when both sources are enabled, and provides a replaceable boundary for local transcription.
+Rusteze is a local-first CLI for macOS, Windows, and Linux. It captures meeting and system audio through each platform's supported native APIs, saves it locally, and can optionally generate transcripts and summaries. It helps people preserve useful meetings and create notes without depending on a hosted recorder's free tier.
 
-> Rusteze is a learning project in active development. Real hardware capture must still be validated on each target operating system.
+Rusteze is a terminal-first, open-source tool. It is deliberately not distributed through Homebrew or Winget; people who want to use it can clone the repository and build it for their platform.
+
+It captures system audio, microphone audio, or both, preserves the source tracks, creates a post-recording mix when both sources are enabled, and provides a replaceable boundary for local transcription.
+
+> Rusteze is in active development. macOS and Windows recording paths are working; the Linux PipeWire path still needs end-to-end validation on real hardware.
 
 Always tell participants that a recording is being made, obtain the required consent, and follow the laws and policies that apply to your meeting.
 
@@ -35,19 +39,22 @@ Always tell participants that a recording is being made, obtain the required con
 
 ## What it does
 
+- Captures meeting playback and, when enabled, microphone input through supported native OS audio APIs.
 - Captures audio directly on macOS, Windows, and Linux.
 - Supports system audio only, system audio plus microphone, or microphone only.
 - Preserves independent source tracks and derives a mixed track after two-source recordings stop.
 - Stores each meeting in its own folder with lifecycle metadata in `session.json`.
 - Keeps the transcription engine replaceable instead of locking the project to one model.
 
+Once a local transcript exists, Rusteze can support an optional summary workflow. The choice of summary engine or provider remains separate from audio capture, so a pricing or free-tier change does not break recording or hold your notes hostage to one service.
+
 ## Platform backends
 
-| Platform | Capture implementation | System track | Microphone track | Derived mix |
-| --- | --- | --- | --- | --- |
-| macOS | Swift helper using Apple audio frameworks | `system.caf` | `mic.caf` | `mixed.caf` |
-| Windows | Native Rust WASAPI | `system.wav` | `mic.wav` | `mixed.wav` |
-| Linux | Native Rust PipeWire | `system.wav` | `mic.wav` | `mixed.wav` |
+| Platform | Capture implementation | System track | Microphone track | Derived mix | Status |
+| --- | --- | --- | --- | --- | --- |
+| macOS | Swift helper using Apple audio frameworks | `system.caf` | `mic.caf` | `mixed.caf` | Working |
+| Windows | Native Rust WASAPI | `system.wav` | `mic.wav` | `mixed.wav` | Working |
+| Linux | Native Rust PipeWire | `system.wav` | `mic.wav` | `mixed.wav` | Needs real-hardware validation |
 
 The Windows backend uses the default render endpoint in loopback mode for system audio and the default capture endpoint for the microphone. The Linux backend uses PipeWire’s active output monitor and default input source. No device names are hardcoded.
 
@@ -66,7 +73,7 @@ Build and run the CLI:
 
 ```bash
 cargo build
-cargo run -- start "Rust workshop"
+cargo run -- start "Project sync"
 ```
 
 Press `Ctrl+C` to finish the recording safely.

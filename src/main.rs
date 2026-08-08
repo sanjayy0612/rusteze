@@ -332,7 +332,7 @@ fn print_usage() {
     println!("  rusteze create-meeting [title]");
     println!("  rusteze mix <session-path>");
     println!("  rusteze transcribe <session-path>");
-    println!("Example: rusteze start \"Rust workshop\" --mic");
+    println!("Example: rusteze start \"Project sync\" --mic");
 }
 
 #[cfg(test)]

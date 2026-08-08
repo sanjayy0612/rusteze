@@ -107,9 +107,19 @@ pub(crate) fn f32le_to_pcm16(bytes: &[u8]) -> Result<Vec<i16>, &'static str> {
     Ok(chunks
         .map(|chunk| {
             let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            (value.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
+            normalized_to_pcm16(value)
         })
         .collect())
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn normalized_to_pcm16(sample: f32) -> i16 {
+    let sample = sample.clamp(-1.0, 1.0);
+    if sample <= -1.0 {
+        i16::MIN
+    } else {
+        (sample * f32::from(i16::MAX)).round() as i16
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -363,7 +373,7 @@ fn mix_wav_tracks(session_folder: &Path) -> io::Result<PathBuf> {
                         .as_ref()
                         .map_or(0.0, |frame| frame[channel]))
                     * 0.5;
-                samples.push((mixed.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16);
+                samples.push(normalized_to_pcm16(mixed));
             }
             if samples.len() >= 4096 * usize::from(output_channels) {
                 if last_space_check.elapsed() >= crate::meeting::RECORDING_SPACE_CHECK_INTERVAL {
@@ -403,7 +413,13 @@ mod tests {
     #[test]
     fn converts_float_samples_to_pcm16() {
         let samples = f32le_to_pcm16(&0.5f32.to_le_bytes()).unwrap();
-        assert_eq!(samples, vec![16_383]);
+        assert_eq!(samples, vec![16_384]);
+    }
+
+    #[test]
+    fn converts_a_full_scale_negative_float_to_pcm16() {
+        let samples = f32le_to_pcm16(&(-1.0f32).to_le_bytes()).unwrap();
+        assert_eq!(samples, vec![i16::MIN]);
     }
 
     #[test]
@@ -471,6 +487,30 @@ mod tests {
             .unwrap();
         assert!((first[0] * 32768.0 - 6_000.0).abs() <= 1.0);
         assert!((first[1] * 32768.0 - 6_000.0).abs() <= 1.0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn preserves_a_full_scale_negative_mix() {
+        let directory = temporary_wav_path().with_extension("session");
+        fs::create_dir(&directory).unwrap();
+        let system_path = directory.join("system.wav");
+        let microphone_path = directory.join("mic.wav");
+
+        for path in [&system_path, &microphone_path] {
+            let mut track = WavWriter::create(path, 48_000, 1).unwrap();
+            track.write_samples(&[i16::MIN]).unwrap();
+            track.finish().unwrap();
+        }
+
+        let output = mix_wav_tracks(&directory).unwrap();
+        let (mut reader, spec) = read_wav_header(&output).unwrap();
+        let mut frames_read = 0;
+        let frame = read_pcm_frame(&mut reader, spec.channels, spec.frames, &mut frames_read)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(frame, vec![-1.0]);
         fs::remove_dir_all(directory).unwrap();
     }
 }
