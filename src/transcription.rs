@@ -19,6 +19,7 @@ pub struct Transcript {
 #[derive(Debug)]
 pub enum TranscriptionError {
     NoEngineConfigured,
+    #[allow(dead_code)] // Used by the first concrete local transcription adapter.
     Engine(String),
     Storage(io::Error),
 }
@@ -142,6 +143,8 @@ fn json_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::write_transcript;
     use super::{json, markdown, Transcript, TranscriptSegment};
 
     #[test]
@@ -158,5 +161,46 @@ mod tests {
         };
         assert!(markdown(&transcript).contains("[00:01.250–00:03.000] Hello"));
         assert!(json(&transcript).contains("\"start_milliseconds\": 1250"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_files_are_private_and_never_overwritten() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "rusteze-transcript-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let transcript = Transcript {
+            engine: "test".to_string(),
+            model: None,
+            text: "private words".to_string(),
+            segments: Vec::new(),
+        };
+
+        write_transcript(&directory, &transcript).unwrap();
+        for file_name in ["transcript.md", "transcript.json"] {
+            let path = directory.join(file_name);
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(write_transcript(&directory, &transcript).is_err());
+        assert_eq!(
+            fs::read_to_string(directory.join("transcript.md")).unwrap(),
+            "# Transcript\n\nEngine: test\n\nprivate words\n"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 }

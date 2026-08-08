@@ -9,6 +9,8 @@ use std::{
 use crate::{native_helper::CaptureMode, storage};
 
 pub const MINIMUM_FREE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const RECORDING_SPACE_CHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5);
 const MAX_RECOVERY_METADATA_BYTES: u64 = 1024 * 1024;
 const SENSITIVE_SESSION_FILES: &[&str] = &[
     "session.json",
@@ -16,6 +18,8 @@ const SENSITIVE_SESSION_FILES: &[&str] = &[
     "system.caf",
     "mic.wav",
     "system.wav",
+    "mixed.caf",
+    "mixed.wav",
     "transcript.md",
     "transcript.json",
 ];
@@ -95,6 +99,13 @@ impl MeetingSession {
             .unwrap_or_default();
         let microphone_track = track_json_value(&enabled_files, "mic.");
         let system_audio_track = track_json_value(&enabled_files, "system.");
+        let mixed_audio_track = if self.folder.join("mixed.caf").is_file() {
+            "\"mixed.caf\"".to_string()
+        } else if self.folder.join("mixed.wav").is_file() {
+            "\"mixed.wav\"".to_string()
+        } else {
+            "null".to_string()
+        };
 
         format!(
             concat!(
@@ -108,7 +119,8 @@ impl MeetingSession {
                 "  \"duration_seconds\": {},\n",
                 "  \"recovery_reason\": {},\n",
                 "  \"microphone_track\": {},\n",
-                "  \"system_audio_track\": {}\n",
+                "  \"system_audio_track\": {},\n",
+                "  \"mixed_audio_track\": {}\n",
                 "}}\n"
             ),
             escape_json_string(&self.id),
@@ -121,6 +133,7 @@ impl MeetingSession {
             recovery_reason,
             microphone_track,
             system_audio_track,
+            mixed_audio_track,
         )
     }
 }
@@ -154,31 +167,24 @@ pub fn recover_interrupted_sessions() -> io::Result<Vec<PathBuf>> {
     for entry in entries {
         let entry = entry?;
         let entry_path = entry.path();
-        let entry_metadata = match fs::symlink_metadata(&entry_path) {
-            Ok(metadata) if metadata.is_dir() && !storage::is_link_or_reparse_point(&metadata) => {
-                metadata
-            }
+        match fs::symlink_metadata(&entry_path) {
+            Ok(metadata) if metadata.is_dir() && !storage::is_link_or_reparse_point(&metadata) => {}
             Ok(_) => continue,
             Err(_) => continue,
-        };
-        let _ = entry_metadata;
+        }
         storage::enforce_private_directory(&entry_path)?;
         harden_existing_session_files(&entry_path)?;
 
         let session_path = entry_path.join("session.json");
-        let metadata = match fs::symlink_metadata(&session_path) {
+        match fs::symlink_metadata(&session_path) {
             Ok(metadata)
                 if metadata.is_file()
                     && !storage::is_link_or_reparse_point(&metadata)
-                    && metadata.len() <= MAX_RECOVERY_METADATA_BYTES =>
-            {
-                metadata
-            }
+                    && metadata.len() <= MAX_RECOVERY_METADATA_BYTES => {}
             Ok(_) => continue,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(_) => continue,
-        };
-        let _ = metadata;
+        }
         let contents = match fs::read_to_string(&session_path) {
             Ok(contents) => contents,
             Err(_) => continue,
@@ -218,14 +224,15 @@ fn recover_session_json(contents: &str, ended_at: u64) -> Option<String> {
 
 /// Refuses to start a new recording when there is too little disk space for a safe session.
 pub fn ensure_recording_space(session: &MeetingSession) -> io::Result<()> {
-    let available = available_disk_space(session.folder())?;
+    ensure_path_has_recording_space(session.folder())
+}
+
+pub(crate) fn ensure_path_has_recording_space(path: &Path) -> io::Result<()> {
+    let available = available_disk_space(path)?;
     if available < MINIMUM_FREE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "Only {available} bytes are free; Rusteze requires at least {MINIMUM_FREE_BYTES} bytes before recording."
-            ),
-        ));
+        return Err(io::Error::other(format!(
+            "Only {available} bytes are free; Rusteze keeps a {MINIMUM_FREE_BYTES}-byte reserve while processing audio."
+        )));
     }
     Ok(())
 }
@@ -336,7 +343,7 @@ fn available_disk_space(path: &Path) -> io::Result<u64> {
         return Err(io::Error::last_os_error());
     }
     let stats = unsafe { stats.assume_init() };
-    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize))
 }
 
 #[cfg(target_os = "windows")]
@@ -497,10 +504,15 @@ fn slugify(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{recover_session_json, slugify, write_atomically, MeetingSession, SessionState};
+    #[cfg(unix)]
+    use super::write_atomically;
+    use super::{recover_session_json, slugify, MeetingSession, SessionState};
     use crate::native_helper::CaptureMode;
-    use std::{fs, path::PathBuf, time::SystemTime};
+    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::{fs, time::SystemTime};
 
+    #[cfg(unix)]
     fn temporary_directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)

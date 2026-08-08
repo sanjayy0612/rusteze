@@ -264,6 +264,31 @@ pub fn start_capture(
     Ok(CaptureProcess { child, stdin })
 }
 
+/// Uses AVFoundation to decode and mix the two finalized CAF tracks.
+#[cfg(target_os = "macos")]
+pub fn mix_audio(session_folder: &Path) -> Result<PathBuf, HelperError> {
+    let helper_path = helper_path();
+    if !helper_path.is_file() {
+        return Err(HelperError::Missing(helper_path));
+    }
+
+    let output = Command::new(helper_path)
+        .arg("mix")
+        .arg(session_folder)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(HelperError::Launch)?;
+
+    if !output.status.success() {
+        return Err(HelperError::Failed {
+            status: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+
+    Ok(session_folder.join("mixed.caf"))
+}
+
 #[cfg(target_os = "macos")]
 fn record_arguments(session_folder: &Path, mode: CaptureMode) -> Vec<OsString> {
     vec![

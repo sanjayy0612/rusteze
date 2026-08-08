@@ -9,9 +9,12 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 /// Creates one application-owned directory and enforces owner-only access.
 pub(crate) fn create_private_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
     let mut builder = DirBuilder::new();
     #[cfg(unix)]
     builder.mode(0o700);
+    #[cfg(not(unix))]
+    let builder = DirBuilder::new();
     builder.create(path)?;
     enforce_private_directory(path)
 }
@@ -184,4 +187,59 @@ fn apply_private_windows_dacl(path: &Path, directory: bool) -> io::Result<()> {
         let _ = LocalFree(Some(HLOCAL(descriptor.0)));
     }
     result
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::{create_private_directory, ensure_private_directory};
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "rusteze-storage-test-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn private_directories_are_owner_only_and_existing_modes_are_hardened() {
+        let directory = temporary_directory("mode");
+        create_private_directory(&directory).unwrap();
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        ensure_private_directory(&directory).unwrap();
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn private_directory_validation_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let target = temporary_directory("target");
+        let link = temporary_directory("link");
+        fs::create_dir(&target).unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(ensure_private_directory(&link).is_err());
+        fs::remove_file(link).unwrap();
+        fs::remove_dir(target).unwrap();
+    }
 }

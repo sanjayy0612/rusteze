@@ -1,31 +1,53 @@
-# Rusteze
+<div align="center">
+  <img src="assets/rusteze-logo.png" alt="Rusteze logo" width="300">
 
-Rusteze is a local-first meeting recorder written in Rust. It captures system audio, microphone audio, or both as separate tracks, keeps the recording on your computer, and provides a replaceable boundary for local transcription.
+  <h1>Rusteze</h1>
 
-> Rusteze is a learning project and is currently in active development. Real hardware capture must still be validated on each target operating system.
+  <p><strong>Local-first meeting recording for macOS, Windows, and Linux.</strong></p>
+  <p>Capture the room. Keep the files. Stay in control.</p>
+
+  <p>
+    <a href="https://github.com/sanjayy0612/rusteze"><img src="https://img.shields.io/badge/status-active_development-bc2b2b?style=flat-square" alt="Status: active development"></a>
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/built_with-Rust-dc8a3d?style=flat-square&logo=rust&logoColor=white" alt="Built with Rust"></a>
+    <a href="https://github.com/sanjayy0612/rusteze"><img src="https://img.shields.io/badge/privacy-local--first-4f6f52?style=flat-square" alt="Local-first privacy"></a>
+    <a href="https://github.com/sanjayy0612/rusteze"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-3f526e?style=flat-square" alt="Platforms: macOS, Windows, Linux"></a>
+  </p>
+</div>
+
+Rusteze is a local-first meeting recorder written in Rust. It captures system audio, microphone audio, or both, preserves the source tracks, creates a post-recording mix when both sources are enabled, and provides a replaceable boundary for local transcription.
+
+> Rusteze is a learning project in active development. Real hardware capture must still be validated on each target operating system.
 
 Always tell participants that a recording is being made, obtain the required consent, and follow the laws and policies that apply to your meeting.
+
+## At a glance
+
+<table>
+  <tr>
+    <td width="50%"><strong>🎙 Native capture</strong><br>Swift audio frameworks on macOS, WASAPI on Windows, and PipeWire on Linux.</td>
+    <td width="50%"><strong>🔒 Local by default</strong><br>Audio, metadata, and future transcripts stay on your computer.</td>
+  </tr>
+  <tr>
+    <td><strong>🎚 Separate tracks</strong><br>Keep system audio and microphone audio independent for better control.</td>
+    <td><strong>🏁 Safe sessions</strong><br>Graceful <code>Ctrl+C</code> shutdown, lifecycle metadata, recovery, and disk checks.</td>
+  </tr>
+</table>
 
 ## What it does
 
 - Captures audio directly on macOS, Windows, and Linux.
-- Supports three recording modes:
-  - system audio only — the default;
-  - system audio plus microphone — `--mic`;
-  - microphone only — `--mic-only`.
-- Keeps microphone and system audio in independent files; it does not mix them.
+- Supports system audio only, system audio plus microphone, or microphone only.
+- Preserves independent source tracks and derives a mixed track after two-source recordings stop.
 - Stores each meeting in its own folder with lifecycle metadata in `session.json`.
-- Stops cleanly with `Ctrl+C` and detects interrupted sessions on the next start.
-- Keeps audio, metadata, and future transcripts local.
-- Leaves the transcription engine replaceable instead of locking the project to one model.
+- Keeps the transcription engine replaceable instead of locking the project to one model.
 
 ## Platform backends
 
-| Platform | Capture implementation | System track | Microphone track |
-| --- | --- | --- | --- |
-| macOS | Swift helper using Apple audio frameworks | `system.caf` | `mic.caf` |
-| Windows | Native Rust WASAPI | `system.wav` | `mic.wav` |
-| Linux | Native Rust PipeWire | `system.wav` | `mic.wav` |
+| Platform | Capture implementation | System track | Microphone track | Derived mix |
+| --- | --- | --- | --- | --- |
+| macOS | Swift helper using Apple audio frameworks | `system.caf` | `mic.caf` | `mixed.caf` |
+| Windows | Native Rust WASAPI | `system.wav` | `mic.wav` | `mixed.wav` |
+| Linux | Native Rust PipeWire | `system.wav` | `mic.wav` | `mixed.wav` |
 
 The Windows backend uses the default render endpoint in loopback mode for system audio and the default capture endpoint for the microphone. The Linux backend uses PipeWire’s active output monitor and default input source. No device names are hardcoded.
 
@@ -36,7 +58,7 @@ The Windows backend uses the default render endpoint in loopback mode for system
 Install Rust through [rustup](https://rustup.rs/), then clone the repository:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/sanjayy0612/rusteze.git
 cd rusteze
 ```
 
@@ -158,11 +180,19 @@ Each recording is stored under:
     ├── mic.caf          # macOS, when microphone is enabled
     ├── system.wav       # Windows/Linux, when system audio is enabled
     ├── mic.wav          # Windows/Linux, when microphone is enabled
+    ├── mixed.caf        # macOS, derived after a two-source recording
+    ├── mixed.wav        # Windows/Linux, derived after a two-source recording
     ├── transcript.md    # written when a transcription engine is available
     └── transcript.json   # written when a transcription engine is available
 ```
 
-Rusteze checks for at least 256 MiB of free space before recording. A session moves through `recording`, `stopping`, and `completed`. If capture or finalization fails, it records a `failed` state and a recoverable reason in `session.json`.
+Rusteze checks for at least 256 MiB of free space before recording. A session moves through `recording`, `stopping`, and `completed`. For `--mic` recordings, mixing runs only after both source files are finalized. The mixer resamples and channel-maps the inputs, applies half gain to each, and publishes the derived file atomically without modifying either source. If capture, mixing, or finalization fails, it records a `failed` state and a recoverable reason in `session.json`.
+
+You can retry mixing for any session that contains both source tracks:
+
+```bash
+cargo run -- mix ~/Documents/rusteze/meetings/<session-folder>
+```
 
 ## Transcription status
 
@@ -180,6 +210,7 @@ The bundled engine is intentionally unconfigured. The project defines the portab
 rusteze start [title] [--mic|--mic-only]
 rusteze request-permissions [--mic|--mic-only]
 rusteze create-meeting [title]
+rusteze mix <session-path>
 rusteze transcribe <session-path>
 ```
 
@@ -191,16 +222,18 @@ Rust CLI
   ├─ selects the capture mode
   ├─ starts and supervises the platform backend
   ├─ handles Ctrl+C
+  ├─ derives a mixed track after two-source capture
   └─ finalizes session state
 
 macOS: Swift helper → Apple audio frameworks → CAF tracks
 Windows: Rust → WASAPI → WAV tracks
 Linux: Rust → PipeWire → WAV tracks
 
+Finalized source tracks → post-recording mixer → mixed.caf / mixed.wav
 Completed session → TranscriptionEngine → transcript.md + transcript.json
 ```
 
-The platform backends remain behind the native capture boundary. Shared Rust code owns session policy, metadata, shutdown, disk checks, and portable output behavior. See [ARCHITECTURE.md](ARCHITECTURE.md), [CONTEXT.md](CONTEXT.md), and [AGENT.md](AGENT.md) for repository-maintainer notes.
+The platform backends remain behind the native capture boundary. Shared Rust code owns session policy, metadata, shutdown, disk checks, and portable output behavior.
 
 ## Development checks
 
@@ -231,8 +264,6 @@ Linux build check:
 cargo build
 cargo test
 ```
-
-Manual Linux capture scenarios are documented in [docs/linux-pipewire-testing.md](docs/linux-pipewire-testing.md). Windows manual scenarios are documented in [docs/windows-wasapi-testing.md](docs/windows-wasapi-testing.md).
 
 ## Project boundaries
 

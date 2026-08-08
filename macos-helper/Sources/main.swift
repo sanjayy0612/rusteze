@@ -56,6 +56,26 @@ func enforcePrivatePermissions(for url: URL, directory: Bool = false) throws {
     )
 }
 
+let minimumFreeRecordingBytes: Int64 = 256 * 1024 * 1024
+
+func ensureRecordingSpace(at url: URL) throws {
+    let values = try url.resourceValues(forKeys: [
+        .volumeAvailableCapacityForImportantUsageKey,
+        .volumeAvailableCapacityKey,
+    ])
+    let importantUsageCapacity = values.volumeAvailableCapacityForImportantUsage
+        .flatMap { $0 > 0 ? $0 : nil }
+    let available = importantUsageCapacity ?? values.volumeAvailableCapacity.map(Int64.init)
+    guard let available else {
+        throw CaptureError.writer("Could not determine available disk space.")
+    }
+    guard available >= minimumFreeRecordingBytes else {
+        throw CaptureError.writer(
+            "Only \(available) bytes are free; Rusteze keeps a \(minimumFreeRecordingBytes)-byte reserve while processing audio."
+        )
+    }
+}
+
 func microphonePermission() -> MicrophonePermission {
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
     case .authorized: return .granted
@@ -349,6 +369,7 @@ func record(folderPath: String, modeValue: String) async -> Int32 {
     do {
         let folder = URL(fileURLWithPath: folderPath)
         try enforcePrivatePermissions(for: folder, directory: true)
+        try ensureRecordingSpace(at: folder)
         try await controller.start(in: folder, mode: mode)
         print("RESULT recording-started")
         fflush(stdout)
@@ -363,7 +384,16 @@ func record(folderPath: String, modeValue: String) async -> Int32 {
             state.requestStop()
         }
 
+        var nextSpaceCheck = Date().addingTimeInterval(5)
         while true {
+            if Date() >= nextSpaceCheck {
+                do {
+                    try ensureRecordingSpace(at: folder)
+                } catch {
+                    state.fail(error.localizedDescription)
+                }
+                nextSpaceCheck = Date().addingTimeInterval(5)
+            }
             let snapshot = state.snapshot()
             if snapshot.stopRequested || snapshot.failureMessage != nil {
                 break
@@ -379,6 +409,132 @@ func record(folderPath: String, modeValue: String) async -> Int32 {
     } catch {
         fputs("Recording could not start: \(error.localizedDescription)\n", stderr)
         await controller.stop()
+        return 1
+    }
+}
+
+func mix(folderPath: String) async -> Int32 {
+    let fileManager = FileManager.default
+    let folder = URL(fileURLWithPath: folderPath, isDirectory: true)
+    let inputURLs = [
+        folder.appendingPathComponent("system.caf"),
+        folder.appendingPathComponent("mic.caf"),
+    ]
+    let destination = folder.appendingPathComponent("mixed.caf")
+    let temporary = folder.appendingPathComponent(".mixed.\(UUID().uuidString).tmp.caf")
+
+    do {
+        try enforcePrivatePermissions(for: folder, directory: true)
+        try ensureRecordingSpace(at: folder)
+        for inputURL in inputURLs {
+            let attributes = try fileManager.attributesOfItem(atPath: inputURL.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular else {
+                throw CaptureError.writer("Refusing to mix non-regular audio file \(inputURL.path).")
+            }
+        }
+
+        let composition = AVMutableComposition()
+        var parameters = [AVMutableAudioMixInputParameters]()
+        for inputURL in inputURLs {
+            let asset = AVURLAsset(url: inputURL)
+            guard let sourceTrack = try await asset.loadTracks(withMediaType: .audio).first,
+                  let compositionTrack = composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                  ) else {
+                throw CaptureError.writer("No readable audio track was found in \(inputURL.lastPathComponent).")
+            }
+            let duration = try await asset.load(.duration)
+            try compositionTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: duration),
+                of: sourceTrack,
+                at: .zero
+            )
+            let inputParameters = AVMutableAudioMixInputParameters(track: compositionTrack)
+            inputParameters.setVolume(0.5, at: .zero)
+            parameters.append(inputParameters)
+        }
+
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = parameters
+        let reader = try AVAssetReader(asset: composition)
+        let readerOutput = AVAssetReaderAudioMixOutput(
+            audioTracks: composition.tracks(withMediaType: .audio),
+            audioSettings: settings
+        )
+        readerOutput.audioMix = mix
+        guard reader.canAdd(readerOutput) else {
+            throw CaptureError.writer("Cannot configure the mixed-audio reader.")
+        }
+        reader.add(readerOutput)
+
+        let writer = try AVAssetWriter(outputURL: temporary, fileType: .caf)
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
+        guard writer.canAdd(writerInput) else {
+            throw CaptureError.writer("Cannot configure the mixed-audio writer.")
+        }
+        writer.add(writerInput)
+        guard writer.startWriting(), reader.startReading() else {
+            throw CaptureError.writer(
+                writer.error?.localizedDescription
+                    ?? reader.error?.localizedDescription
+                    ?? "Could not start audio mixing."
+            )
+        }
+        try enforcePrivatePermissions(for: temporary)
+        writer.startSession(atSourceTime: .zero)
+        var nextSpaceCheck = Date().addingTimeInterval(5)
+
+        while reader.status == .reading {
+            if Date() >= nextSpaceCheck {
+                try ensureRecordingSpace(at: folder)
+                nextSpaceCheck = Date().addingTimeInterval(5)
+            }
+            if writerInput.isReadyForMoreMediaData {
+                guard let sample = readerOutput.copyNextSampleBuffer() else { break }
+                guard writerInput.append(sample) else {
+                    throw CaptureError.writer(
+                        writer.error?.localizedDescription ?? "Could not write mixed audio."
+                    )
+                }
+            } else {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
+        guard reader.status == .completed else {
+            throw CaptureError.writer(
+                reader.error?.localizedDescription ?? "Could not read both source tracks."
+            )
+        }
+        writerInput.markAsFinished()
+        await withCheckedContinuation { continuation in
+            writer.finishWriting { continuation.resume() }
+        }
+        guard writer.status == .completed else {
+            throw CaptureError.writer(
+                writer.error?.localizedDescription ?? "Could not finalize mixed audio."
+            )
+        }
+
+        if fileManager.fileExists(atPath: destination.path) {
+            _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try fileManager.moveItem(at: temporary, to: destination)
+        }
+        try enforcePrivatePermissions(for: destination)
+        return 0
+    } catch {
+        try? fileManager.removeItem(at: temporary)
+        fputs("Audio mixing failed: \(error.localizedDescription)\n", stderr)
         return 1
     }
 }
@@ -415,8 +571,14 @@ struct RustezeCaptureHelper {
                 exit(64)
             }
             exit(await record(folderPath: arguments[1], modeValue: arguments[2]))
+        case "mix":
+            guard arguments.count == 2 else {
+                fputs("Usage: rusteze-capture-helper mix SESSION_FOLDER\n", stderr)
+                exit(64)
+            }
+            exit(await mix(folderPath: arguments[1]))
         default:
-            fputs("Usage: rusteze-capture-helper <check-permissions|request-permissions|record SESSION_FOLDER system|microphone|both>\n", stderr)
+            fputs("Usage: rusteze-capture-helper <check-permissions|request-permissions|record SESSION_FOLDER system|microphone|both|mix SESSION_FOLDER>\n", stderr)
             exit(64)
         }
     }

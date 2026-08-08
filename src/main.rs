@@ -1,4 +1,3 @@
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
 mod audio;
 mod meeting;
 mod native_helper;
@@ -12,8 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 use transcription::TranscriptionEngine;
-
-const RECORDING_SPACE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 fn main() {
     let mut arguments = env::args().skip(1);
@@ -87,6 +84,17 @@ fn main() {
             }
             transcribe(&session_path);
         }
+        Some("mix") => {
+            let Some(session_path) = arguments.next() else {
+                print_usage();
+                process::exit(64);
+            };
+            if arguments.next().is_some() {
+                print_usage();
+                process::exit(64);
+            }
+            mix_audio(&session_path);
+        }
         _ => print_usage(),
     }
 }
@@ -105,6 +113,16 @@ fn transcribe(session_path: &str) {
         }
         Err(error) => {
             eprintln!("{error}");
+            process::exit(1);
+        }
+    }
+}
+
+fn mix_audio(session_path: &str) {
+    match audio::mix_tracks(std::path::Path::new(session_path)) {
+        Ok(path) => println!("Mixed audio written to {}", path.display()),
+        Err(error) => {
+            eprintln!("Could not mix audio: {error}");
             process::exit(1);
         }
     }
@@ -186,7 +204,7 @@ fn start_recording(title: &str, mode: CaptureMode) {
                     fail_and_exit(&mut session, &reason);
                 }
 
-                if last_space_check.elapsed() >= RECORDING_SPACE_CHECK_INTERVAL {
+                if last_space_check.elapsed() >= meeting::RECORDING_SPACE_CHECK_INTERVAL {
                     if let Err(error) = meeting::ensure_recording_space(&session) {
                         let mut reason = format!(
                             "Recording stopped before the disk reserve was exhausted: {error}"
@@ -212,6 +230,17 @@ fn start_recording(title: &str, mode: CaptureMode) {
             &mut session,
             &format!("Could not finalize audio files: {error}"),
         );
+    }
+
+    if mode == CaptureMode::Both {
+        if let Err(error) = audio::mix_tracks(session.folder()) {
+            fail_and_exit(
+                &mut session,
+                &format!(
+                    "Audio tracks were preserved, but the mixed track could not be created: {error}"
+                ),
+            );
+        }
     }
 
     match meeting::complete(&mut session) {
@@ -301,6 +330,7 @@ fn print_usage() {
     );
     println!("  rusteze request-permissions [--mic|--mic-only]");
     println!("  rusteze create-meeting [title]");
+    println!("  rusteze mix <session-path>");
     println!("  rusteze transcribe <session-path>");
     println!("Example: rusteze start \"Rust workshop\" --mic");
 }
