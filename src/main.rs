@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod audio;
 mod meeting;
 mod native_helper;
 mod transcription;

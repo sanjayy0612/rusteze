@@ -17,10 +17,16 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{check_permissions, request_permissions, start_capture};
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{check_permissions, request_permissions, start_capture};
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 #[path = "unsupported.rs"]
 mod unsupported;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub use unsupported::{check_permissions, request_permissions, start_capture};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,11 +63,18 @@ impl CaptureMode {
             }
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         match self {
             Self::System => vec!["system.caf"],
             Self::Microphone => vec!["mic.caf"],
             Self::Both => vec!["system.caf", "mic.caf"],
+        }
+
+        #[cfg(target_os = "linux")]
+        match self {
+            Self::System => vec!["system.wav"],
+            Self::Microphone => vec!["mic.wav"],
+            Self::Both => vec!["system.wav", "mic.wav"],
         }
     }
 }

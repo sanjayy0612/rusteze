@@ -1,4 +1,5 @@
 use super::{CaptureMode, HelperError, PermissionStatus};
+use crate::audio::WavWriter;
 use ::windows::Win32::{
     Media::Audio::{
         eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
@@ -11,8 +12,7 @@ use ::windows::Win32::{
     },
 };
 use std::{
-    fs::File,
-    io::{self, Seek, SeekFrom, Write},
+    io,
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -47,62 +47,6 @@ struct CaptureFormat {
     bytes_per_sample: usize,
     bits_per_sample: u16,
     kind: SampleKind,
-}
-
-struct WavWriter {
-    file: File,
-    data_bytes: u32,
-    sample_rate: u32,
-    channels: u16,
-}
-
-impl WavWriter {
-    fn create(path: &Path, sample_rate: u32, channels: u16) -> io::Result<Self> {
-        let mut file = File::create(path)?;
-        file.write_all(&[0; 44])?;
-        Ok(Self {
-            file,
-            data_bytes: 0,
-            sample_rate,
-            channels,
-        })
-    }
-
-    fn write_samples(&mut self, samples: &[i16]) -> io::Result<()> {
-        let mut bytes = Vec::with_capacity(samples.len() * 2);
-        for sample in samples {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        self.file.write_all(&bytes)?;
-        self.data_bytes = self
-            .data_bytes
-            .checked_add(bytes.len() as u32)
-            .ok_or_else(|| io::Error::other("WAV file is too large"))?;
-        Ok(())
-    }
-
-    fn finish(mut self) -> io::Result<()> {
-        let byte_rate = self.sample_rate * u32::from(self.channels) * 2;
-        let block_align = self.channels * 2;
-        let riff_size = 36u32
-            .checked_add(self.data_bytes)
-            .ok_or_else(|| io::Error::other("WAV file is too large"))?;
-
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(b"RIFF")?;
-        self.file.write_all(&riff_size.to_le_bytes())?;
-        self.file.write_all(b"WAVEfmt ")?;
-        self.file.write_all(&16u32.to_le_bytes())?;
-        self.file.write_all(&WAVE_FORMAT_PCM.to_le_bytes())?;
-        self.file.write_all(&self.channels.to_le_bytes())?;
-        self.file.write_all(&self.sample_rate.to_le_bytes())?;
-        self.file.write_all(&byte_rate.to_le_bytes())?;
-        self.file.write_all(&block_align.to_le_bytes())?;
-        self.file.write_all(&16u16.to_le_bytes())?;
-        self.file.write_all(b"data")?;
-        self.file.write_all(&self.data_bytes.to_le_bytes())?;
-        self.file.flush()
-    }
 }
 
 struct ComApartment;
@@ -234,7 +178,11 @@ pub fn check_permissions(mode: CaptureMode) -> Result<PermissionStatus, HelperEr
         } else {
             "not_required".to_string()
         },
-        screen_recording: "not_required".to_string(),
+        screen_recording: if mode.requires_screen_recording() {
+            "granted".to_string()
+        } else {
+            "not_required".to_string()
+        },
     })
 }
 

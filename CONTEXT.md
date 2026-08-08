@@ -25,6 +25,7 @@ Rusteze is a personal, local-first replacement for hosted meeting-recording and 
 - `Ctrl+C` asks the helper to finish the enabled files before the session is marked `completed`.
 - The macOS helper builds with `./macos-helper/build.sh` on a Mac with full Xcode.
 - Windows uses the Rust `windows` crate and native WASAPI; no helper process or external recorder is required.
+- Linux uses the Rust `pipewire` crate and native PipeWire streams; no external recorder is required.
 - The transcription boundary writes `transcript.md` and `transcript.json` for a future engine result. The bundled engine intentionally returns “not configured.”
 
 ## Current folder contract
@@ -33,8 +34,8 @@ Rusteze is a personal, local-first replacement for hosted meeting-recording and 
 ~/Documents/rusteze/meetings/
 └── <timestamp>-<meeting-title>/
     ├── session.json
-    ├── mic.caf (macOS) / mic.wav (Windows)
-    ├── system.caf (macOS) / system.wav (Windows)
+    ├── mic.caf (macOS) / mic.wav (Windows/Linux)
+    ├── system.caf (macOS) / system.wav (Windows/Linux)
     ├── transcript.md           # after a transcription engine writes a result
     └── transcript.json         # after a transcription engine writes a result
 ```
@@ -44,5 +45,7 @@ Rusteze is a personal, local-first replacement for hosted meeting-recording and 
 - The current Mac must grant the permission(s) required by the selected mode before a real recording can begin.
 - Real hardware recording has not yet been validated on this machine because those permissions are currently denied/missing.
 - Windows WASAPI hardware behavior must be validated on a Windows machine with active audio endpoints.
+- Linux PipeWire hardware behavior must be validated on a Linux desktop with an active PipeWire session and endpoints.
+- Linux device selection uses the active/default source and output only; explicit device selection is future work.
 - Interrupted-session recovery, low-disk-space preflight (256 MiB), and unexpected helper-exit detection are implemented.
 - Device-change/sleep validation, `status`, `list`, and a real transcription engine are still future work.

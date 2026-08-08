@@ -6,9 +6,10 @@ Read `README.md`, `PLAN.md`, `CONTEXT.md`, `ARCHITECTURE.md`, and this file befo
 
 ## Current milestone
 
-The selectable foreground capture path is implemented for macOS and Windows.
-macOS uses the Swift helper; Windows uses native WASAPI. Both still need
-end-to-end recording tests on their respective operating systems.
+The selectable foreground capture path is implemented for macOS, Windows, and
+Linux. macOS uses the Swift helper; Windows uses native WASAPI; Linux uses
+native PipeWire. Each platform still needs end-to-end recording tests on its
+respective operating system.
 
 ```bash
 ./macos-helper/build.sh
@@ -34,4 +35,4 @@ cargo test
 ./macos-helper/build.sh
 ```
 
-The Swift build uses Xcode’s compiler cache and may need to run outside a restricted sandbox. Windows WASAPI requires a real Windows audio endpoint. Do not attempt real audio capture without the user’s explicit permission and appropriate OS privacy approval.
+The Swift build uses Xcode’s compiler cache and may need to run outside a restricted sandbox. Windows WASAPI requires a real Windows audio endpoint. Linux requires PipeWire development files at build time and a running desktop PipeWire session at runtime. Do not attempt real audio capture without the user’s explicit permission and appropriate OS privacy approval.

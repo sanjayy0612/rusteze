@@ -281,11 +281,30 @@ fn available_disk_space(path: &Path) -> io::Result<u64> {
     Ok(available)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+fn available_disk_space(path: &Path) -> io::Result<u64> {
+    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Session path contains a null byte.",
+        )
+    })?;
+    let mut stats = MaybeUninit::<libc::statvfs>::zeroed();
+    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn available_disk_space(_path: &Path) -> io::Result<u64> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "Rusteze recording is currently supported only on macOS and Windows.",
+        "Rusteze recording is currently supported only on macOS, Windows, and Linux.",
     ))
 }
 

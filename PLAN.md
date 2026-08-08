@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Rusteze is a personal, **local-first macOS and Windows CLI** for recording meetings and turning completed recordings into local transcripts.
+Rusteze is a personal, **local-first macOS, Windows, and Linux CLI** for recording meetings and turning completed recordings into local transcripts.
 
 It is a Rust learning project as well as a useful tool. The core program owns meeting capture, session folders, metadata, and transcription orchestration. It does **not** contain AI-agent, Notion, Obsidian, or cloud-provider code.
 
@@ -34,7 +34,7 @@ Later, an external AI agent may read a transcript and create summaries or publis
 
 ### Included
 
-- macOS and Windows capture backends
+- macOS, Windows, and Linux capture backends
 - Terminal-first workflow
 - Foreground recording with clean `Ctrl+C` shutdown
 - Microphone capture as one track
@@ -55,7 +55,6 @@ Later, an external AI agent may read a transcript and create summaries or publis
 - Multi-speaker diarization
 - Background daemon recording
 - GUI application
-- Linux support
 - Homebrew packaging
 
 ## Architecture
@@ -67,6 +66,7 @@ Rust CLI                         Capture backend
 --------                         ---------------
 commands and session state       macOS: Swift helper
 meeting folders and metadata     Windows: native WASAPI
+                                 Linux: native PipeWire
 Ctrl+C / graceful shutdown       captures microphone audio
 transcription orchestration      captures system audio
 ```
@@ -76,7 +76,9 @@ The Rust CLI is the project brain. It owns the command-line UX, creates sessions
 The macOS helper uses Apple-supported frameworks instead of Rusteze speaking
 directly to hardware drivers. The Windows backend uses shared-mode WASAPI with
 the default render endpoint in loopback mode and the default capture endpoint
-for microphone input.
+for microphone input. The Linux backend uses PipeWire autoconnection to the
+active output monitor or default input source and negotiates the graph's rate
+and channel count.
 
 | Rusteze need | macOS responsibility |
 |---|---|

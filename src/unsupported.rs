@@ -5,13 +5,13 @@ pub struct CaptureProcess;
 
 pub fn check_permissions(_mode: CaptureMode) -> Result<PermissionStatus, HelperError> {
     Err(HelperError::Backend(
-        "Rusteze capture is currently supported only on macOS and Windows.".to_string(),
+        "Rusteze capture is currently supported only on macOS, Windows, and Linux.".to_string(),
     ))
 }
 
 pub fn request_permissions(_mode: CaptureMode) -> Result<PermissionStatus, HelperError> {
     Err(HelperError::Backend(
-        "Rusteze capture is currently supported only on macOS and Windows.".to_string(),
+        "Rusteze capture is currently supported only on macOS, Windows, and Linux.".to_string(),
     ))
 }
 
@@ -20,7 +20,7 @@ pub fn start_capture(
     _mode: CaptureMode,
 ) -> Result<CaptureProcess, HelperError> {
     Err(HelperError::Backend(
-        "Rusteze capture is currently supported only on macOS and Windows.".to_string(),
+        "Rusteze capture is currently supported only on macOS, Windows, and Linux.".to_string(),
     ))
 }
 

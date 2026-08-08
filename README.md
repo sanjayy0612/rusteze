@@ -1,12 +1,12 @@
 # rusteze
 
-A local-first macOS and Windows command-line tool for recording meeting audio, transcribing it on your laptop, and optionally creating a summary.
+A local-first macOS, Windows, and Linux command-line tool for recording meeting audio, transcribing it on your laptop, and optionally creating a summary.
 
 ## Why it exists
 
 Meeting tools often require a bot, a paid plan, or uploading audio to someone else's servers. `rusteze` aims to keep control with you:
 
-- capture meeting audio directly on your Mac or Windows PC;
+- capture meeting audio directly on macOS, Windows, or Linux;
 - keep recordings and transcription local;
 - only send transcript text to an LLM if you explicitly ask for a summary.
 
@@ -16,12 +16,12 @@ Always get the consent of everyone being recorded and follow the laws and polici
 
 This is a learning-by-building project. We will build one small, understandable piece at a time instead of starting with a large, complex application.
 
-## Current phase: selectable audio capture, ready for macOS/Windows hardware validation
+## Current phase: selectable audio capture, ready for platform hardware validation
 
 `rusteze start [title]` creates a self-contained session folder under
-`~/Documents/rusteze/meetings`, asks the included native macOS helper to check
-the permissions required by the selected capture mode, records the lifecycle in
-`session.json`, and stops cleanly with `Ctrl+C`.
+`~/Documents/rusteze/meetings`, checks the platform capture backend for the
+selected mode, records the lifecycle in `session.json`, and stops cleanly with
+`Ctrl+C`.
 
 ```bash
 cargo run -- start "Rust workshop"            # system audio only (default)
@@ -75,6 +75,31 @@ the default render endpoint in loopback mode and microphone capture uses the
 default capture endpoint. Windows recordings are written as `system.wav` and
 `mic.wav`; macOS recordings remain CAF files.
 
+On Linux, Rusteze uses the native PipeWire Rust bindings. System capture uses
+the active output's monitor path, while microphone capture autoconnects to the
+default input source. Linux recordings are written as `system.wav` and
+`mic.wav`. PipeWire negotiates the graph sample rate and channel count; Rusteze
+converts the negotiated F32LE frames to PCM16 WAV.
+
+Linux development prerequisites are the PipeWire client development files,
+`pkg-config`, a C compiler, and Clang/libclang for the bindings generator:
+
+```bash
+# Ubuntu/Debian
+sudo apt install build-essential pkg-config clang libclang-dev \
+  libpipewire-0.3-dev libspa-0.2-dev
+
+# Fedora
+sudo dnf install gcc gcc-c++ make pkgconf-pkg-config clang pipewire-devel
+
+# Arch Linux
+sudo pacman -S --needed base-devel pkgconf clang pipewire libpipewire
+```
+
+The PipeWire daemon and an active desktop audio session are required at runtime.
+Linux does not show a Rusteze permission prompt; PipeWire, desktop sandbox, and
+device errors are reported during backend initialization.
+
 Windows development builds require a Windows Rust toolchain:
 
 ```powershell
@@ -87,6 +112,15 @@ macOS regression build:
 ```bash
 cargo build
 ./macos-helper/build.sh
+```
+
+Linux build and checks:
+
+```bash
+cargo build
+cargo build --release
+cargo test
+cargo fmt -- --check
 ```
 
 ## Local model setup
@@ -108,7 +142,8 @@ Not in the first version:
 - background daemon support;
 - transcription or LLM summaries;
 - per-app audio capture;
-- Linux support.
+- explicit Linux device selection;
+- seamless recovery when an audio device changes during capture;
 
 ## Planned command shape
 
