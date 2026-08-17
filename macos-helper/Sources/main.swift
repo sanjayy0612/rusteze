@@ -256,9 +256,25 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 throw CaptureError.writer("System-audio stream has no format description.")
             }
             let newWriter = try AVAssetWriter(outputURL: outputURL, fileType: .caf)
-            let newInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: sourceFormat)
+            let outputSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 2,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
+            let newInput = AVAssetWriterInput(
+                mediaType: .audio,
+                outputSettings: outputSettings,
+                sourceFormatHint: sourceFormat
+            )
             guard newWriter.canAdd(newInput) else {
-                throw CaptureError.writer("Cannot add a system-audio track to the output file.")
+                throw CaptureError.writer(
+                    "Cannot add a system-audio track to the output file; supported media types: "
+                        + newWriter.availableMediaTypes.map(\.rawValue).joined(separator: ", ")
+                )
             }
             newWriter.add(newInput)
             guard newWriter.startWriting() else {
