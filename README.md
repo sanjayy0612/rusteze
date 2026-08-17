@@ -211,6 +211,12 @@ cargo run -- transcribe ~/Documents/rusteze/meetings/<session-folder>
 
 The bundled engine is intentionally unconfigured. The project defines the portable transcript types and output files, but a local engine such as whisper.cpp still needs to be selected and connected.
 
+Before uploading or transcribing a macOS CAF recording, prepare a broadly compatible speech WAV:
+
+    cargo run -- prepare-audio ~/Documents/rusteze/meetings/<session-folder>/system.caf
+
+This creates system-16k-mono.wav beside the CAF. It is mono, 16 kHz, 16-bit PCM and is suitable for common speech transcription tools and audio upload workflows. Pass a second path to choose the output location.
+
 ## CLI reference
 
 ```text

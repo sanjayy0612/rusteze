@@ -1,6 +1,7 @@
 mod audio;
 mod meeting;
 mod native_helper;
+mod prepare_audio;
 mod storage;
 mod transcription;
 
@@ -94,6 +95,28 @@ fn main() {
                 process::exit(64);
             }
             mix_audio(&session_path);
+        }
+        Some("prepare-audio") => {
+            let Some(input_path) = arguments.next() else {
+                print_usage();
+                process::exit(64);
+            };
+            let output_path = arguments.next();
+            if arguments.next().is_some() {
+                print_usage();
+                process::exit(64);
+            }
+
+            match prepare_audio::prepare(
+                std::path::Path::new(&input_path),
+                output_path.as_deref().map(std::path::Path::new),
+            ) {
+                Ok(path) => println!("Prepared audio written to {}", path.display()),
+                Err(error) => {
+                    eprintln!("Could not prepare audio: {error}");
+                    process::exit(1);
+                }
+            }
         }
         _ => print_usage(),
     }
@@ -332,6 +355,7 @@ fn print_usage() {
     println!("  rusteze create-meeting [title]");
     println!("  rusteze mix <session-path>");
     println!("  rusteze transcribe <session-path>");
+    println!("  rusteze prepare-audio <input-path> [output-path]");
     println!("Example: rusteze start \"Project sync\" --mic");
 }
 
