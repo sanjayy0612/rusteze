@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreGraphics
 import CoreMedia
+import Darwin
 import Foundation
 import ScreenCaptureKit
 
@@ -540,6 +541,10 @@ func mix(folderPath: String) async -> Int32 {
 @main
 struct RustezeCaptureHelper {
     static func main() async {
+        // Rust owns Ctrl+C handling and sends the helper an explicit stop command.
+        // Ignore SIGINT here so the child cannot terminate before finalizing audio.
+        signal(SIGINT, SIG_IGN)
+
         let arguments = Array(CommandLine.arguments.dropFirst())
         switch arguments.first {
         case "check-permissions":
